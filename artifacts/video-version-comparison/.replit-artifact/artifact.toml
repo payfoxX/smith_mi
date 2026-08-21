@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Video Version Comparison"
+description = "A browser-based post-production QC prototype for comparing two video versions side by side with synchronized playback, frame stepping, and perceptual difference overlays."
+version = "1.0.0"
+id = "artifacts/video-version-comparison"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 20040
+
+[services.development]
+run = "pnpm --filter @workspace/video-version-comparison run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/video-version-comparison", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/video-version-comparison/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "20040"
+BASE_PATH = "/"

@@ -1,0 +1,30 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "ouH2VjzEJmP5oxs9eiG5z"
+uri = "file://.conversation/video_version_comparison_concept.md"
+type = "text"
+title = "Video Version Comparison & Metadata QC"
+description = "Markdown document containing the complete feasibility review, product recommendations, technical approach, MVP scope, and post-production QC suggestions."
+logical_id = "d861de3d-595d-475a-9bdd-3771fa643823"
+content_hash = "sha256:a20a4f79465ba4b58732f7b7bf7feb29a7c3a2059dc888c972c33b1e5e873d61"
+size = 6420
+mtime_ms = 1787278374726
+storage_uri = "gcs://replit-rams-assets-spock/rams/assets/conversation:5adbf925-3766-45ce-9d8c-be5fc457135a/d861de3d-595d-475a-9bdd-3771fa643823/7a12773b-fc47-498e-b5f7-d6e71ddb2ee7"
+storage_version_token = "1787278375582610"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "_H0R5ruxaH0eWk1vrraLj"
+uri = "file://.conversation/video_version_comparison_prototype.html"
+type = "text"
+title = "Video Version Comparison Browser Prototype"
+description = "Self-contained browser prototype for loading Version 1 and Version 2 videos, synchronized playback, frame comparison, and blue/red difference overlays."
+logical_id = "4af6a2a3-64f6-4531-84b1-d13523430367"
+content_hash = "sha256:adb65763607bf8e958cab64e32dbde046c580f007250dee7212e65f76a7192b5"
+size = 6930
+mtime_ms = 1787310115020
+storage_uri = "gcs://replit-rams-assets-spock/rams/assets/conversation:5adbf925-3766-45ce-9d8c-be5fc457135a/4af6a2a3-64f6-4531-84b1-d13523430367/18287588-be3a-4f52-b485-45f8cd203e4b"
+storage_version_token = "1787310115808408"
+content_type = "text/html"
