@@ -28,6 +28,7 @@ import { Router as WouterRouter, Route, Switch } from 'wouter';
 
 type Version = 1 | 2;
 type ViewMode = 'split' | 'diff';
+type OverlayMode = 'dots' | 'markers';
 type VideoFile = { file: File; url: string; duration: number; width: number; height: number };
 type ChangeEvent = { id: string; time: number; label: string; kind: 'blue' | 'red' };
 
@@ -129,15 +130,15 @@ function VideoPane({
 function Inspector({
   sensitivity,
   setSensitivity,
-  showMarkers,
-  setShowMarkers,
+  overlayMode,
+  setOverlayMode,
   hasVideos,
   onReset,
 }: {
   sensitivity: number;
   setSensitivity: (value: number) => void;
-  showMarkers: boolean;
-  setShowMarkers: (value: boolean) => void;
+  overlayMode: OverlayMode;
+  setOverlayMode: (value: OverlayMode) => void;
   hasVideos: boolean;
   onReset: () => void;
 }) {
@@ -173,17 +174,13 @@ function Inspector({
           </div>
           <div className="setting">
             <div>
-              <div className="setting-label">Change markers</div>
-              <div className="setting-description">Highlight changed pixels</div>
+              <div className="setting-label">Difference overlay</div>
+              <div className="setting-description">Choose how changes are drawn</div>
             </div>
-            <button
-              type="button"
-              className={`toggle ${showMarkers ? 'on' : ''}`}
-              onClick={() => setShowMarkers(!showMarkers)}
-              aria-pressed={showMarkers}
-              aria-label="Toggle change markers"
-              data-testid="button-toggle-markers"
-            />
+            <div className="overlay-choice" role="group" aria-label="Difference overlay style">
+              <button type="button" className={overlayMode === 'dots' ? 'active' : ''} onClick={() => setOverlayMode('dots')} aria-pressed={overlayMode === 'dots'} data-testid="button-overlay-dots">Dots</button>
+              <button type="button" className={overlayMode === 'markers' ? 'active' : ''} onClick={() => setOverlayMode('markers')} aria-pressed={overlayMode === 'markers'} data-testid="button-overlay-markers">Markers</button>
+            </div>
           </div>
           <div className="setting">
             <div>
@@ -210,7 +207,7 @@ function Inspector({
             <Info size={13} color="#55c8ec" /> READOUT
           </div>
           <p style={{ margin: '7px 0 0', color: '#617a84', fontSize: 10, lineHeight: 1.5 }}>
-            Blue marks indicate new or brighter content in V2. Red marks indicate content removed or darker in V2.
+            Blue indicates new or brighter V2 content. Red indicates removed or darker V2 content. Neighborhood filtering suppresses isolated compression noise.
           </p>
         </div>
       </div>
@@ -226,7 +223,7 @@ function Home() {
   const [playing, setPlaying] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('split');
   const [sensitivity, setSensitivity] = useState(24);
-  const [showMarkers, setShowMarkers] = useState(true);
+  const [overlayMode, setOverlayMode] = useState<OverlayMode>('markers');
   const [isRendering, setIsRendering] = useState(false);
   const [announcement, setAnnouncement] = useState('Load two local video files to begin.');
   const [utilityPanel, setUtilityPanel] = useState<'shortcuts' | 'help' | null>(null);
@@ -256,7 +253,6 @@ function Home() {
       };
       if (version === 1) setVersionOne(loaded);
       else setVersionTwo(loaded);
-      setDuration((old) => Math.max(old, Number.isFinite(probe.duration) ? probe.duration : 0));
       setAnnouncement(`Version ${version} loaded. ${file.name} is ready for comparison.`);
       probe.remove();
     };
@@ -278,6 +274,14 @@ function Home() {
   useEffect(() => {
     return () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
+
+  useEffect(() => {
+    if (versionOne && versionTwo) {
+      setDuration(Math.min(versionOne.duration, versionTwo.duration));
+    } else {
+      setDuration(versionOne?.duration ?? versionTwo?.duration ?? 0);
+    }
+  }, [versionOne, versionTwo]);
 
   useEffect(() => {
     const one = videoOneRef.current;
@@ -302,13 +306,9 @@ function Home() {
     }
     setIsRendering(true);
     const timer = window.setTimeout(() => {
-      const events: ChangeEvent[] = [
-        { id: 'e1', time: Math.min(12.8, duration * .18 || 12.8), label: 'Lower-third enters', kind: 'blue' },
-        { id: 'e2', time: Math.min(28.4, duration * .39 || 28.4), label: 'Background plate removed', kind: 'red' },
-        { id: 'e3', time: Math.min(46.1, duration * .63 || 46.1), label: 'Exposure shift', kind: 'blue' },
-        { id: 'e4', time: Math.min(61.7, duration * .82 || 61.7), label: 'End card differs', kind: 'red' },
-      ];
-      setChangeEvents(events.filter((event, index, all) => event.time > 0 && all.findIndex((item) => item.time === event.time) === index));
+      // Timeline events are reserved for persistent, sampled differences.
+      // The live map is the source of truth until a full scan is available.
+      setChangeEvents([]);
       setIsRendering(false);
     }, 500);
     return () => window.clearTimeout(timer);
@@ -319,7 +319,8 @@ function Home() {
     const one = videoOneRef.current;
     const two = videoTwoRef.current;
     if (!canvas || !one || !two || !one.videoWidth || !two.videoWidth) return;
-    const width = 640;
+
+    const width = 720;
     const height = Math.round(width * (one.videoHeight / one.videoWidth || 9 / 16));
     canvas.width = width;
     canvas.height = height;
@@ -331,32 +332,79 @@ function Home() {
     const ctxB = sourceB.getContext('2d', { willReadFrequently: true });
     const output = canvas.getContext('2d');
     if (!ctxA || !ctxB || !output) return;
+
     ctxA.drawImage(one, 0, 0, width, height);
     ctxB.drawImage(two, 0, 0, width, height);
     const a = ctxA.getImageData(0, 0, width, height);
     const b = ctxB.getImageData(0, 0, width, height);
     const result = output.createImageData(width, height);
-    for (let i = 0; i < a.data.length; i += 4) {
-      const dr = b.data[i] - a.data[i];
-      const dg = b.data[i + 1] - a.data[i + 1];
-      const db = b.data[i + 2] - a.data[i + 2];
-      const delta = Math.abs(dr) + Math.abs(dg) + Math.abs(db);
-      if (showMarkers && delta > sensitivity * 3) {
-        const brighter = dr + dg + db > 0;
-        result.data[i] = brighter ? 34 : 209;
-        result.data[i + 1] = brighter ? 169 : 61;
-        result.data[i + 2] = brighter ? 235 : 72;
-        result.data[i + 3] = Math.min(225, 90 + delta);
-      } else {
-        const luminance = (a.data[i] * .2126 + a.data[i + 1] * .7152 + a.data[i + 2] * .0722) * .27;
-        result.data[i] = luminance;
-        result.data[i + 1] = luminance + 3;
-        result.data[i + 2] = luminance + 8;
-        result.data[i + 3] = 255;
+    const changed = new Uint8Array(width * height);
+    const signedLuma = new Float32Array(width * height);
+    const threshold = 5 + sensitivity * 1.55;
+
+    // Perceptual scoring is more reliable than raw RGB equality: codec grain,
+    // chroma subsampling and small color shifts should not fill the frame.
+    for (let p = 0, i = 0; p < changed.length; p += 1, i += 4) {
+      const lumaA = a.data[i] * .2126 + a.data[i + 1] * .7152 + a.data[i + 2] * .0722;
+      const lumaB = b.data[i] * .2126 + b.data[i + 1] * .7152 + b.data[i + 2] * .0722;
+      const chromaDelta = (Math.abs(b.data[i] - a.data[i]) + Math.abs(b.data[i + 1] - a.data[i + 1]) + Math.abs(b.data[i + 2] - a.data[i + 2])) / 3;
+      const score = Math.abs(lumaB - lumaA) * .8 + chromaDelta * .2;
+      signedLuma[p] = lumaB - lumaA;
+      changed[p] = score > threshold ? 1 : 0;
+    }
+
+    // Require nearby support to reject isolated compression specks.
+    for (let y = 1; y < height - 1; y += 1) {
+      for (let x = 1; x < width - 1; x += 1) {
+        const p = y * width + x;
+        if (!changed[p]) continue;
+        let neighbors = 0;
+        for (let oy = -1; oy <= 1; oy += 1) {
+          for (let ox = -1; ox <= 1; ox += 1) neighbors += changed[(y + oy) * width + x + ox];
+        }
+        if (neighbors < (overlayMode === 'dots' ? 2 : 3)) changed[p] = 0;
       }
     }
+
+    for (let p = 0, i = 0; p < changed.length; p += 1, i += 4) {
+      const luminance = (a.data[i] * .2126 + a.data[i + 1] * .7152 + a.data[i + 2] * .0722) * .22;
+      result.data[i] = luminance;
+      result.data[i + 1] = luminance + 4;
+      result.data[i + 2] = luminance + 10;
+      result.data[i + 3] = 255;
+    }
     output.putImageData(result, 0, 0);
-  }, [sensitivity, showMarkers]);
+
+    if (overlayMode === 'dots') {
+      for (let y = 1; y < height - 1; y += 2) {
+        for (let x = 1; x < width - 1; x += 2) {
+          const p = y * width + x;
+          if (!changed[p]) continue;
+          output.fillStyle = signedLuma[p] >= 0 ? 'rgba(42, 193, 246, .92)' : 'rgba(232, 84, 107, .92)';
+          output.fillRect(x, y, 2, 2);
+        }
+      }
+    } else {
+      const block = 8;
+      for (let y = 0; y < height; y += block) {
+        for (let x = 0; x < width; x += block) {
+          let count = 0;
+          let direction = 0;
+          for (let oy = 0; oy < block && y + oy < height; oy += 1) {
+            for (let ox = 0; ox < block && x + ox < width; ox += 1) {
+              const p = (y + oy) * width + x + ox;
+              count += changed[p];
+              direction += signedLuma[p] * changed[p];
+            }
+          }
+          if (count >= 5) {
+            output.fillStyle = direction >= 0 ? 'rgba(42, 193, 246, .78)' : 'rgba(232, 84, 107, .78)';
+            output.fillRect(x, y, block, block);
+          }
+        }
+      }
+    }
+  }, [sensitivity, overlayMode]);
 
   useEffect(() => {
     if (viewMode !== 'diff' || !hasVideos) return;
@@ -484,7 +532,7 @@ function Home() {
                 {viewMode === 'diff' && hasVideos ? (
                   <>
                     <canvas ref={canvasRef} className="diff-canvas" aria-label="Difference map showing changed pixels" data-testid="canvas-difference-map" />
-                    <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span></div>
+                    <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span><span className="legend-mode">{overlayMode === 'dots' ? 'DOT VIEW' : 'MARKER VIEW'}</span></div>
                   </>
                 ) : viewMode === 'diff' ? (
                   <div className="empty-viewer">
@@ -537,13 +585,13 @@ function Home() {
               </section>
               <section className="panel" aria-label="Comparison settings">
                 <div className="panel-head"><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Settings2 size={14} color="#62cceb" /><span className="panel-heading">READOUT SETTINGS</span></div></div>
-                <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Adjust sensitivity and marker visibility in the inspector. Changes apply to the live difference map.</div>
+                 <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Choose dots for pixel-level inspection or markers for grouped regions. The live readout uses perceptual luminance/chroma scoring and neighborhood filtering.</div>
                 <div style={{ borderTop: '1px solid #1e2f38', padding: '11px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}><AlertTriangle size={13} color="#d68568" style={{ flex: '0 0 auto', marginTop: 1 }} /><span style={{ color: '#927a6d', fontSize: 10, lineHeight: 1.45 }}>Pixel comparison is a visual aid, not a substitute for a calibrated review.</span></div>
               </section>
             </div>
           </div>
         </main>
-        <Inspector sensitivity={sensitivity} setSensitivity={setSensitivity} showMarkers={showMarkers} setShowMarkers={setShowMarkers} hasVideos={hasVideos} onReset={reset} />
+        <Inspector sensitivity={sensitivity} setSensitivity={setSensitivity} overlayMode={overlayMode} setOverlayMode={setOverlayMode} hasVideos={hasVideos} onReset={reset} />
       </div>
       <div className="sr-only" role="status" aria-live="polite" data-testid="status-announcement">{announcement}</div>
       {utilityPanel && (
