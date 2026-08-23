@@ -26,6 +26,8 @@ import {
 } from 'lucide-react';
 import { Router as WouterRouter, Route, Switch } from 'wouter';
 
+import { computeDiffCore } from './diff';
+
 type Version = 1 | 2;
 type ViewMode = 'split' | 'diff';
 type OverlayMode = 'dots' | 'markers';
@@ -48,6 +50,113 @@ const fileSize = (bytes: number) => {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
+
+const READY_ENOUGH = 2; // HTMLMediaElement.HAVE_CURRENT_DATA — a frame is decoded and paintable.
+
+// Wait until a video has at least one decoded frame available to draw.
+function waitForFrame(video: HTMLVideoElement, timeoutMs = 5000): Promise<void> {
+  return new Promise((resolve) => {
+    if (video.readyState >= READY_ENOUGH) {
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      video.removeEventListener('loadeddata', finish);
+      video.removeEventListener('canplay', finish);
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const timer = window.setTimeout(finish, timeoutMs);
+    video.addEventListener('loadeddata', finish);
+    video.addEventListener('canplay', finish);
+  });
+}
+
+// Seek one video and resolve only once it has painted the requested frame.
+// Seeking to the time already showing fires no `seeked` event, so that case
+// resolves on the next animation frame; a timeout guards against a missing event.
+function seekVideo(video: HTMLVideoElement, time: number, timeoutMs = 800): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      video.removeEventListener('seeked', finish);
+      video.removeEventListener('loadedmetadata', begin);
+      window.clearTimeout(timer);
+      resolve();
+    };
+    const begin = () => {
+      if (done) return;
+      video.removeEventListener('loadedmetadata', begin);
+      if (video.readyState >= READY_ENOUGH && Math.abs(video.currentTime - time) < 1e-3) {
+        requestAnimationFrame(finish);
+        return;
+      }
+      video.addEventListener('seeked', finish);
+      try {
+        video.currentTime = time;
+      } catch {
+        finish();
+      }
+    };
+    const timer = window.setTimeout(finish, timeoutMs);
+    if (video.readyState >= 1) begin();
+    else video.addEventListener('loadedmetadata', begin);
+  });
+}
+
+// Frame-lock two videos to the same timestamp so a comparison reflects the same
+// moment in both. Without this, motion between mis-aligned frames reads as a change.
+async function seekBoth(a: HTMLVideoElement, b: HTMLVideoElement, time: number): Promise<void> {
+  await Promise.all([seekVideo(a, time), seekVideo(b, time)]);
+}
+
+// Draw a video into a WxH canvas using "contain" fit. When both sources share an
+// aspect ratio the frame fills exactly; when they differ, identical black bars are
+// added to each, so the bars cancel to zero difference instead of misregistering.
+function drawContain(ctx: CanvasRenderingContext2D, video: HTMLVideoElement, W: number, H: number) {
+  const vw = video.videoWidth || W;
+  const vh = video.videoHeight || H;
+  const scale = Math.min(W / vw, H / vh);
+  const dw = vw * scale;
+  const dh = vh * scale;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  ctx.drawImage(video, 0, 0, vw, vh, (W - dw) / 2, (H - dh) / 2, dw, dh);
+}
+
+// Collapse a series of per-sample scores into discrete timeline events: each
+// contiguous run above the area threshold becomes one event at its peak.
+function buildChangeEvents(
+  samples: { time: number; fraction: number; direction: number }[],
+): ChangeEvent[] {
+  const AREA_THRESHOLD = 0.006; // >= 0.6% of the frame changed to count as material
+  const events: ChangeEvent[] = [];
+  let peak: { time: number; fraction: number; direction: number } | null = null;
+  const flush = () => {
+    if (!peak) return;
+    events.push({
+      id: `evt-${events.length}-${Math.round(peak.time * 1000)}`,
+      time: peak.time,
+      label: `${(peak.fraction * 100).toFixed(1)}% of frame · ${formatTimecode(peak.time)}`,
+      kind: peak.direction >= 0 ? 'blue' : 'red',
+    });
+    peak = null;
+  };
+  for (const sample of samples) {
+    if (sample.fraction >= AREA_THRESHOLD) {
+      if (!peak || sample.fraction > peak.fraction) peak = sample;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return events.slice(0, 40);
+}
 
 function DropZone({
   version,
@@ -225,13 +334,18 @@ function Home() {
   const [sensitivity, setSensitivity] = useState(24);
   const [overlayMode, setOverlayMode] = useState<OverlayMode>('markers');
   const [isRendering, setIsRendering] = useState(false);
+  const [isRecomputing, setIsRecomputing] = useState(false);
+  const [mismatchWarning, setMismatchWarning] = useState(false);
   const [announcement, setAnnouncement] = useState('Load two local video files to begin.');
   const [utilityPanel, setUtilityPanel] = useState<'shortcuts' | 'help' | null>(null);
   const [changeEvents, setChangeEvents] = useState<ChangeEvent[]>([]);
   const videoOneRef = useRef<HTMLVideoElement>(null);
   const videoTwoRef = useRef<HTMLVideoElement>(null);
+  const scanOneRef = useRef<HTMLVideoElement>(null);
+  const scanTwoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const frameRef = useRef<number | null>(null);
+  const computeSeqRef = useRef(0);
+  const debounceRef = useRef<number | null>(null);
   const objectUrls = useRef<string[]>([]);
 
   const hasVideos = Boolean(versionOne && versionTwo);
@@ -299,20 +413,75 @@ function Home() {
     };
   }, [versionOne, versionTwo]);
 
+  // Real timeline scan: sample the duration, frame-lock an offscreen video pair at
+  // each point, and score the whole frame. Runs off the visible players so it never
+  // disturbs the user's playhead. Debounced and cancelable so scrubbing sensitivity
+  // or swapping files doesn't pile up scans.
   useEffect(() => {
     if (!hasVideos || !versionOne || !versionTwo) {
       setChangeEvents([]);
+      setIsRendering(false);
       return;
     }
-    setIsRendering(true);
-    const timer = window.setTimeout(() => {
-      // Timeline events are reserved for persistent, sampled differences.
-      // The live map is the source of truth until a full scan is available.
-      setChangeEvents([]);
+    let cancelled = false;
+
+    const runScan = async () => {
+      const one = scanOneRef.current;
+      const two = scanTwoRef.current;
+      if (!one || !two) return;
+      setIsRendering(true);
+      await waitForFrame(one);
+      await waitForFrame(two);
+      if (cancelled) return;
+
+      const dur = Math.min(one.duration || 0, two.duration || 0);
+      if (!dur || !Number.isFinite(dur)) {
+        setIsRendering(false);
+        return;
+      }
+
+      const W = 160;
+      const aspect = ((one.videoWidth / one.videoHeight) + (two.videoWidth / two.videoHeight)) / 2 || 16 / 9;
+      const H = Math.max(2, Math.round(W / aspect));
+      const ca = document.createElement('canvas');
+      const cb = document.createElement('canvas');
+      ca.width = cb.width = W;
+      ca.height = cb.height = H;
+      const cxa = ca.getContext('2d', { willReadFrequently: true });
+      const cxb = cb.getContext('2d', { willReadFrequently: true });
+      if (!cxa || !cxb) {
+        setIsRendering(false);
+        return;
+      }
+
+      const samples: { time: number; fraction: number; direction: number }[] = [];
+      const count = Math.min(60, Math.max(16, Math.round(dur * 2)));
+      for (let s = 0; s < count; s += 1) {
+        if (cancelled) return;
+        const t = count > 1 ? (s / (count - 1)) * dur * 0.999 : 0;
+        await seekBoth(one, two, t);
+        if (cancelled) return;
+        drawContain(cxa, one, W, H);
+        drawContain(cxb, two, W, H);
+        const a = cxa.getImageData(0, 0, W, H);
+        const b = cxb.getImageData(0, 0, W, H);
+        const core = computeDiffCore(a.data, b.data, W, H, sensitivity);
+        samples.push({ time: t, fraction: core.changedFraction, direction: core.netDirection });
+      }
+      if (cancelled) return;
+      setChangeEvents(buildChangeEvents(samples));
       setIsRendering(false);
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [hasVideos, versionOne, versionTwo, duration]);
+    };
+
+    const startTimer = window.setTimeout(() => {
+      void runScan();
+    }, 350);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(startTimer);
+    };
+  }, [hasVideos, versionOne, versionTwo, sensitivity]);
 
   const drawDifference = useCallback(() => {
     const canvas = canvasRef.current;
@@ -320,8 +489,14 @@ function Home() {
     const two = videoTwoRef.current;
     if (!canvas || !one || !two || !one.videoWidth || !two.videoWidth) return;
 
-    const width = 720;
-    const height = Math.round(width * (one.videoHeight / one.videoWidth || 9 / 16));
+    const aspectA = one.videoWidth / one.videoHeight;
+    const aspectB = two.videoWidth / two.videoHeight;
+    const mismatch = Math.abs(aspectA - aspectB) > 0.02;
+    setMismatchWarning((prev) => (prev === mismatch ? prev : mismatch));
+
+    const width = 640;
+    const aspect = (aspectA + aspectB) / 2 || 16 / 9;
+    const height = Math.max(2, Math.round(width / aspect));
     canvas.width = width;
     canvas.height = height;
     const sourceA = document.createElement('canvas');
@@ -333,59 +508,41 @@ function Home() {
     const output = canvas.getContext('2d');
     if (!ctxA || !ctxB || !output) return;
 
-    ctxA.drawImage(one, 0, 0, width, height);
-    ctxB.drawImage(two, 0, 0, width, height);
+    drawContain(ctxA, one, width, height);
+    drawContain(ctxB, two, width, height);
     const a = ctxA.getImageData(0, 0, width, height);
     const b = ctxB.getImageData(0, 0, width, height);
+
+    const { changed, signedLuma } = computeDiffCore(a.data, b.data, width, height, sensitivity);
+
+    // Base = darkened V1 luminance. In dot mode, changed pixels are recolored in
+    // place (exact and fast — no per-pixel fillRect); markers overlay blocks after.
+    const dotMode = overlayMode === 'dots';
     const result = output.createImageData(width, height);
-    const changed = new Uint8Array(width * height);
-    const signedLuma = new Float32Array(width * height);
-    const threshold = 5 + sensitivity * 1.55;
-
-    // Perceptual scoring is more reliable than raw RGB equality: codec grain,
-    // chroma subsampling and small color shifts should not fill the frame.
     for (let p = 0, i = 0; p < changed.length; p += 1, i += 4) {
-      const lumaA = a.data[i] * .2126 + a.data[i + 1] * .7152 + a.data[i + 2] * .0722;
-      const lumaB = b.data[i] * .2126 + b.data[i + 1] * .7152 + b.data[i + 2] * .0722;
-      const chromaDelta = (Math.abs(b.data[i] - a.data[i]) + Math.abs(b.data[i + 1] - a.data[i + 1]) + Math.abs(b.data[i + 2] - a.data[i + 2])) / 3;
-      const score = Math.abs(lumaB - lumaA) * .8 + chromaDelta * .2;
-      signedLuma[p] = lumaB - lumaA;
-      changed[p] = score > threshold ? 1 : 0;
-    }
-
-    // Require nearby support to reject isolated compression specks.
-    for (let y = 1; y < height - 1; y += 1) {
-      for (let x = 1; x < width - 1; x += 1) {
-        const p = y * width + x;
-        if (!changed[p]) continue;
-        let neighbors = 0;
-        for (let oy = -1; oy <= 1; oy += 1) {
-          for (let ox = -1; ox <= 1; ox += 1) neighbors += changed[(y + oy) * width + x + ox];
+      if (dotMode && changed[p]) {
+        if (signedLuma[p] >= 0) {
+          result.data[i] = 42;
+          result.data[i + 1] = 193;
+          result.data[i + 2] = 246;
+        } else {
+          result.data[i] = 232;
+          result.data[i + 1] = 84;
+          result.data[i + 2] = 107;
         }
-        if (neighbors < (overlayMode === 'dots' ? 2 : 3)) changed[p] = 0;
+      } else {
+        const luminance = (a.data[i] * 0.2126 + a.data[i + 1] * 0.7152 + a.data[i + 2] * 0.0722) * 0.22;
+        result.data[i] = luminance;
+        result.data[i + 1] = luminance + 4;
+        result.data[i + 2] = luminance + 10;
       }
-    }
-
-    for (let p = 0, i = 0; p < changed.length; p += 1, i += 4) {
-      const luminance = (a.data[i] * .2126 + a.data[i + 1] * .7152 + a.data[i + 2] * .0722) * .22;
-      result.data[i] = luminance;
-      result.data[i + 1] = luminance + 4;
-      result.data[i + 2] = luminance + 10;
       result.data[i + 3] = 255;
     }
     output.putImageData(result, 0, 0);
 
-    if (overlayMode === 'dots') {
-      for (let y = 1; y < height - 1; y += 2) {
-        for (let x = 1; x < width - 1; x += 2) {
-          const p = y * width + x;
-          if (!changed[p]) continue;
-          output.fillStyle = signedLuma[p] >= 0 ? 'rgba(42, 193, 246, .92)' : 'rgba(232, 84, 107, .92)';
-          output.fillRect(x, y, 2, 2);
-        }
-      }
-    } else {
+    if (!dotMode) {
       const block = 8;
+      const minCover = Math.ceil(block * block * 0.25); // a block lights up at >=25% coverage
       for (let y = 0; y < height; y += block) {
         for (let x = 0; x < width; x += block) {
           let count = 0;
@@ -393,12 +550,14 @@ function Home() {
           for (let oy = 0; oy < block && y + oy < height; oy += 1) {
             for (let ox = 0; ox < block && x + ox < width; ox += 1) {
               const p = (y + oy) * width + x + ox;
-              count += changed[p];
-              direction += signedLuma[p] * changed[p];
+              if (changed[p]) {
+                count += 1;
+                direction += signedLuma[p];
+              }
             }
           }
-          if (count >= 5) {
-            output.fillStyle = direction >= 0 ? 'rgba(42, 193, 246, .78)' : 'rgba(232, 84, 107, .78)';
+          if (count >= minCover) {
+            output.fillStyle = direction >= 0 ? 'rgba(42, 193, 246, .72)' : 'rgba(232, 84, 107, .72)';
             output.fillRect(x, y, block, block);
           }
         }
@@ -406,17 +565,37 @@ function Home() {
     }
   }, [sensitivity, overlayMode]);
 
+  // Entering the difference map pauses playback: two independent <video> elements
+  // cannot be frame-locked while playing, so a meaningful diff requires stopping.
+  useEffect(() => {
+    if (viewMode !== 'diff') return;
+    setPlaying(false);
+    videoOneRef.current?.pause();
+    videoTwoRef.current?.pause();
+  }, [viewMode]);
+
+  // Recompute the difference map only on a frame-locked pair. Debounced so seek
+  // scrubbing coalesces; a per-request token drops stale async results.
   useEffect(() => {
     if (viewMode !== 'diff' || !hasVideos) return;
-    const render = () => {
-      drawDifference();
-      frameRef.current = requestAnimationFrame(render);
-    };
-    frameRef.current = requestAnimationFrame(render);
+    const one = videoOneRef.current;
+    const two = videoTwoRef.current;
+    if (!one || !two) return;
+    const seq = (computeSeqRef.current += 1);
+    setIsRecomputing(true);
+    if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    debounceRef.current = window.setTimeout(() => {
+      const target = Math.min(currentTime, duration || currentTime || 0);
+      void seekBoth(one, two, target).then(() => {
+        if (seq !== computeSeqRef.current) return;
+        drawDifference();
+        setIsRecomputing(false);
+      });
+    }, 80);
     return () => {
-      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [viewMode, hasVideos, drawDifference]);
+  }, [viewMode, hasVideos, currentTime, duration, drawDifference]);
 
   const togglePlayback = useCallback(() => {
     const one = videoOneRef.current;
@@ -532,6 +711,12 @@ function Home() {
                 {viewMode === 'diff' && hasVideos ? (
                   <>
                     <canvas ref={canvasRef} className="diff-canvas" aria-label="Difference map showing changed pixels" data-testid="canvas-difference-map" />
+                    {isRecomputing && (
+                      <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> ALIGNING FRAMES</div>
+                    )}
+                    {mismatchWarning && (
+                      <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
+                    )}
                     <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span><span className="legend-mode">{overlayMode === 'dots' ? 'DOT VIEW' : 'MARKER VIEW'}</span></div>
                   </>
                 ) : viewMode === 'diff' ? (
@@ -593,6 +778,12 @@ function Home() {
         </main>
         <Inspector sensitivity={sensitivity} setSensitivity={setSensitivity} overlayMode={overlayMode} setOverlayMode={setOverlayMode} hasVideos={hasVideos} onReset={reset} />
       </div>
+      {versionOne && versionTwo && (
+        <div aria-hidden="true" style={{ position: 'absolute', left: -99999, top: 0, width: 1, height: 1, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}>
+          <video ref={scanOneRef} src={versionOne.url} muted playsInline preload="auto" data-testid="video-scan-1" />
+          <video ref={scanTwoRef} src={versionTwo.url} muted playsInline preload="auto" data-testid="video-scan-2" />
+        </div>
+      )}
       <div className="sr-only" role="status" aria-live="polite" data-testid="status-announcement">{announcement}</div>
       {utilityPanel && (
         <div
