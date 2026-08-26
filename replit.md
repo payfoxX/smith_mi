@@ -22,7 +22,13 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/video-version-comparison/src/App.tsx` — router wiring the three media pages.
+- `artifacts/video-version-comparison/src/pages/{video,audio,image}-compare.tsx` — the three comparison pages.
+- `artifacts/video-version-comparison/src/diff.ts` — DOM-free pixel diff kernel (video + image), unit-tested in `diff.test.ts`.
+- `artifacts/video-version-comparison/src/audio/dsp.ts` — DOM-free audio diff kernel (FFT, band analysis, added/removed/common + pitch), unit-tested in `audio/dsp.test.ts`.
+- `artifacts/video-version-comparison/src/components/topbar.tsx` — shared brand + media nav.
+- `artifacts/video-version-comparison/src/lib/canvas.ts` — contain-fit drawing and diff-map renderer shared by video/image.
+- DB schema: `lib/db` · API contract: `lib/api-spec/openapi.yaml` · theme: `src/index.css` per app.
 
 ## Architecture decisions
 
@@ -30,7 +36,13 @@ _Populate as you build — non-obvious choices a reader couldn't infer from the 
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+FrameCheck (`artifacts/video-version-comparison`) is a local-only version-comparison QC app with three media types, navigable from the top bar (`/video`, `/audio`, `/image`):
+
+- **Video** — frame-aligned split view plus a live pixel difference map (blue = added/brighter, red = removed/darker), timeline scan, sensitivity + dot/marker overlays.
+- **Audio** — waveform lanes tinted by a spectral diff (blue = added, red = removed, grey = common), a frequency × time spectral map, pitch/tone-shift detection via spectral centroid, synchronized playback, and a change-event timeline.
+- **Image** — split, pixel difference map, and draggable wipe views over the same diff kernel.
+
+All media is processed in the browser (object URLs only; nothing is uploaded).
 
 ## User preferences
 
