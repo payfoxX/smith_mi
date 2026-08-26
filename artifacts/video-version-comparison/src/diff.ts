@@ -131,3 +131,47 @@ export function computeDiffCore(
   }
   return { changed: opened, signedLuma, changedFraction: count / n, netDirection: direction };
 }
+
+export const FPS = 24;
+
+// Format a time in seconds as HH:MM:SS or HH:MM:SS:FF (frames at FPS).
+export function formatTimecode(seconds: number, showFrames = true): string {
+  const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const secs = Math.floor(safe % 60);
+  const frames = Math.floor((safe % 1) * FPS);
+  const base = [hours, minutes, secs].map((value) => String(value).padStart(2, '0')).join(':');
+  return showFrames ? `${base}:${String(frames).padStart(2, '0')}` : base;
+}
+
+export type ChangeEvent = { id: string; time: number; label: string; kind: 'blue' | 'red' };
+
+export type ChangeSample = { time: number; fraction: number; direction: number };
+
+// Collapse a series of per-sample scores into discrete timeline events: each
+// contiguous run above the area threshold becomes one event at its peak sample.
+export function buildChangeEvents(samples: ChangeSample[]): ChangeEvent[] {
+  const AREA_THRESHOLD = 0.006; // >= 0.6% of the frame changed to count as material
+  const events: ChangeEvent[] = [];
+  let peak: ChangeSample | null = null;
+  const flush = () => {
+    if (!peak) return;
+    events.push({
+      id: `evt-${events.length}-${Math.round(peak.time * 1000)}`,
+      time: peak.time,
+      label: `${(peak.fraction * 100).toFixed(1)}% of frame · ${formatTimecode(peak.time)}`,
+      kind: peak.direction >= 0 ? 'blue' : 'red',
+    });
+    peak = null;
+  };
+  for (const sample of samples) {
+    if (sample.fraction >= AREA_THRESHOLD) {
+      if (!peak || sample.fraction > peak.fraction) peak = sample;
+    } else {
+      flush();
+    }
+  }
+  flush();
+  return events.slice(0, 40);
+}

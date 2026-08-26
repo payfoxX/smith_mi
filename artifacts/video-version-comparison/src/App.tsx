@@ -26,25 +26,12 @@ import {
 } from 'lucide-react';
 import { Router as WouterRouter, Route, Switch } from 'wouter';
 
-import { computeDiffCore } from './diff';
+import { computeDiffCore, buildChangeEvents, formatTimecode, FPS, type ChangeEvent } from './diff';
 
 type Version = 1 | 2;
 type ViewMode = 'split' | 'diff';
 type OverlayMode = 'dots' | 'markers';
 type VideoFile = { file: File; url: string; duration: number; width: number; height: number };
-type ChangeEvent = { id: string; time: number; label: string; kind: 'blue' | 'red' };
-
-const FPS = 24;
-
-const formatTimecode = (seconds: number, showFrames = true) => {
-  const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const secs = Math.floor(safe % 60);
-  const frames = Math.floor((safe % 1) * FPS);
-  const base = [hours, minutes, secs].map((value) => String(value).padStart(2, '0')).join(':');
-  return showFrames ? `${base}:${String(frames).padStart(2, '0')}` : base;
-};
 
 const fileSize = (bytes: number) => {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -127,35 +114,6 @@ function drawContain(ctx: CanvasRenderingContext2D, video: HTMLVideoElement, W: 
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(video, 0, 0, vw, vh, (W - dw) / 2, (H - dh) / 2, dw, dh);
-}
-
-// Collapse a series of per-sample scores into discrete timeline events: each
-// contiguous run above the area threshold becomes one event at its peak.
-function buildChangeEvents(
-  samples: { time: number; fraction: number; direction: number }[],
-): ChangeEvent[] {
-  const AREA_THRESHOLD = 0.006; // >= 0.6% of the frame changed to count as material
-  const events: ChangeEvent[] = [];
-  let peak: { time: number; fraction: number; direction: number } | null = null;
-  const flush = () => {
-    if (!peak) return;
-    events.push({
-      id: `evt-${events.length}-${Math.round(peak.time * 1000)}`,
-      time: peak.time,
-      label: `${(peak.fraction * 100).toFixed(1)}% of frame · ${formatTimecode(peak.time)}`,
-      kind: peak.direction >= 0 ? 'blue' : 'red',
-    });
-    peak = null;
-  };
-  for (const sample of samples) {
-    if (sample.fraction >= AREA_THRESHOLD) {
-      if (!peak || sample.fraction > peak.fraction) peak = sample;
-    } else {
-      flush();
-    }
-  }
-  flush();
-  return events.slice(0, 40);
 }
 
 function DropZone({

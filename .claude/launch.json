@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "framecheck",
+      "runtimeExecutable": "corepack",
+      "runtimeArgs": [
+        "pnpm",
+        "--filter",
+        "@workspace/video-version-comparison",
+        "run",
+        "dev"
+      ],
+      "port": 5173
+    }
+  ]
+}
