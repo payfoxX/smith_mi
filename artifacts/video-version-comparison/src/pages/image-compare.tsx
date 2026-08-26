@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 
 import { TopBar } from '@/components/topbar';
-import { drawContain, renderDiffImage, type DiffOverlayMode } from '@/lib/canvas';
+import { drawContain, renderDiffImage, renderDiffOverlay, type DiffOverlayMode } from '@/lib/canvas';
 
 type Version = 1 | 2;
 type ViewMode = 'split' | 'diff' | 'wipe';
@@ -274,7 +274,10 @@ export default function ImageComparePage() {
     setIsRendering(false);
   }, [viewMode, versionOne, versionTwo, sensitivity, overlayMode]);
 
-  // Wipe view — V1 on the left of the divider, V2 on the right.
+  // Wipe view — the diff map (marks composited over the master image) sits on
+  // the left of the divider and the clean master on the right, so dragging the
+  // divider wipes the dots / markers off the image and reveals the real pixels
+  // underneath. Recomputes when sensitivity or the overlay style changes.
   useEffect(() => {
     if (viewMode !== 'wipe' || !versionOne || !versionTwo) return;
     const canvas = wipeRef.current;
@@ -292,17 +295,40 @@ export default function ImageComparePage() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, width, height);
-    drawContain(ctx, one, one.naturalWidth, one.naturalHeight, width, height);
-    ctx.save();
+    // Contain-fit both versions once, at the same alignment as the diff map,
+    // so the marks line up with the image they describe.
+    const sourceA = document.createElement('canvas');
+    const sourceB = document.createElement('canvas');
+    sourceA.width = sourceB.width = width;
+    sourceA.height = sourceB.height = height;
+    const ctxA = sourceA.getContext('2d', { willReadFrequently: true });
+    const ctxB = sourceB.getContext('2d', { willReadFrequently: true });
+    if (!ctxA || !ctxB) return;
+    drawContain(ctxA, one, one.naturalWidth, one.naturalHeight, width, height);
+    drawContain(ctxB, two, two.naturalWidth, two.naturalHeight, width, height);
+    const a = ctxA.getImageData(0, 0, width, height);
+    const b = ctxB.getImageData(0, 0, width, height);
+    const overlay = renderDiffOverlay(
+      a.data,
+      b.data,
+      width,
+      height,
+      sensitivity,
+      overlayMode,
+    );
+
     const split = Math.round(wipePos * width);
+    // Right of the divider: the clean master image (marks wiped off).
+    ctx.drawImage(sourceA, 0, 0);
+    // Left of the divider: the master with the difference marks on top.
+    ctx.save();
     ctx.beginPath();
-    ctx.rect(split, 0, width - split, height);
+    ctx.rect(0, 0, split, height);
     ctx.clip();
-    drawContain(ctx, two, two.naturalWidth, two.naturalHeight, width, height);
+    ctx.drawImage(overlay, 0, 0);
     ctx.restore();
 
+    // Divider + handle.
     ctx.fillStyle = 'rgba(220, 240, 250, .92)';
     ctx.fillRect(split - 1, 0, 2, height);
     ctx.fillStyle = '#9be7ff';
@@ -312,7 +338,7 @@ export default function ImageComparePage() {
     ctx.strokeStyle = '#123c4d';
     ctx.lineWidth = 2;
     ctx.stroke();
-  }, [viewMode, versionOne, versionTwo, wipePos]);
+  }, [viewMode, versionOne, versionTwo, sensitivity, overlayMode, wipePos]);
 
   const updateWipe = useCallback((clientX: number) => {
     const canvas = wipeRef.current;
@@ -335,7 +361,7 @@ export default function ImageComparePage() {
     <div className="app-shell dark">
       <TopBar
         active="image"
-        shortcuts={[['Drag', 'Drag the wipe divider to compare'], ['← / →', 'Move the wipe divider']]}
+        shortcuts={[['Drag', 'Drag the wipe divider to remove the difference marks'], ['← / →', 'Move the wipe divider']]}
         aboutText="A focused local review surface for image version checks. Images are loaded with local object URLs and are never uploaded."
       />
 
@@ -390,31 +416,40 @@ export default function ImageComparePage() {
                   </div>
                 ) : null}
                 {viewMode === 'wipe' && hasImages ? (
-                  <canvas
-                    ref={wipeRef}
-                    className="wipe-canvas"
-                    aria-label="Wipe comparison — drag the divider to reveal each version"
-                    data-testid="canvas-wipe"
-                    tabIndex={0}
-                    style={{ cursor: 'ew-resize', touchAction: 'none', outline: 'none' }}
-                    onPointerDown={(event) => {
-                      draggingRef.current = true;
-                      (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
-                      updateWipe(event.clientX);
-                    }}
-                    onPointerMove={(event) => {
-                      if (draggingRef.current) updateWipe(event.clientX);
-                    }}
-                    onPointerUp={() => { draggingRef.current = false; }}
-                    onPointerCancel={() => { draggingRef.current = false; }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'ArrowLeft') setWipePos((p) => Math.max(0, p - 0.02));
-                      if (event.key === 'ArrowRight') setWipePos((p) => Math.min(1, p + 0.02));
-                    }}
-                  />
+                  <>
+                    <canvas
+                      ref={wipeRef}
+                      className="wipe-canvas"
+                      aria-label="Wipe comparison — drag the divider to wipe the difference marks off the master image"
+                      data-testid="canvas-wipe"
+                      tabIndex={0}
+                      style={{ cursor: 'ew-resize', touchAction: 'none', outline: 'none' }}
+                      onPointerDown={(event) => {
+                        draggingRef.current = true;
+                        (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
+                        updateWipe(event.clientX);
+                      }}
+                      onPointerMove={(event) => {
+                        if (draggingRef.current) updateWipe(event.clientX);
+                      }}
+                      onPointerUp={() => { draggingRef.current = false; }}
+                      onPointerCancel={() => { draggingRef.current = false; }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'ArrowLeft') setWipePos((p) => Math.max(0, p - 0.02));
+                        if (event.key === 'ArrowRight') setWipePos((p) => Math.min(1, p + 0.02));
+                      }}
+                    />
+                    <span className="pane-label">DIFF MARKS</span>
+                    <span className="pane-label" style={{ left: 'auto', right: 10 }}>CLEAN V1</span>
+                    <div className="diff-legend">
+                      <span><i className="legend-chip blue" />New / brighter</span>
+                      <span><i className="legend-chip red" />Removed / darker</span>
+                      <span className="legend-mode">{overlayMode === 'dots' ? 'WIPE · DOT OVERLAY' : 'WIPE · MARKER OVERLAY'}</span>
+                    </div>
+                  </>
                 ) : viewMode === 'wipe' ? (
                   <div className="empty-viewer">
-                    <div className="empty-inner"><div className="empty-glyph"><ImageIcon size={19} /></div><div className="empty-title">Wipe is standing by</div><div className="empty-copy">Load both versions, then drag the divider to compare.</div></div>
+                    <div className="empty-inner"><div className="empty-glyph"><ImageIcon size={19} /></div><div className="empty-title">Wipe is standing by</div><div className="empty-copy">Load both versions, then drag the divider to wipe the difference marks off the image.</div></div>
                   </div>
                 ) : null}
               </div>
@@ -435,7 +470,7 @@ export default function ImageComparePage() {
                     </>
                   ) : (
                     <>
-                      Switch to <strong>Diff map</strong> for a pixel-level readout, or <strong>Wipe</strong> to drag a divider across both versions. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
+                      Switch to <strong>Diff map</strong> for a pixel-level readout, or <strong>Wipe</strong> to drag the divider and wipe the difference marks off the master image — verify each mark against the real pixels underneath. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
                     </>
                   )}
                 </div>
