@@ -16,10 +16,10 @@ import {
 } from 'lucide-react';
 
 import { TopBar } from '@/components/topbar';
-import { drawContain, renderDiffImage, renderDiffOverlay, type DiffOverlayMode } from '@/lib/canvas';
+import { drawContain, renderDiffImage } from '@/lib/canvas';
 
 type Version = 1 | 2;
-type ViewMode = 'split' | 'diff' | 'wipe';
+type ViewMode = 'split' | 'diff';
 type ImageFile = { file: File; url: string; width: number; height: number };
 
 const fileSize = (bytes: number) => {
@@ -108,15 +108,11 @@ function ImagePane({
 function ImageInspector({
   sensitivity,
   setSensitivity,
-  overlayMode,
-  setOverlayMode,
   hasImages,
   onReset,
 }: {
   sensitivity: number;
   setSensitivity: (value: number) => void;
-  overlayMode: DiffOverlayMode;
-  setOverlayMode: (value: DiffOverlayMode) => void;
   hasImages: boolean;
   onReset: () => void;
 }) {
@@ -134,7 +130,7 @@ function ImageInspector({
           <div className="setting">
             <div>
               <div className="setting-label">Difference sensitivity</div>
-              <div className="setting-description">Pixel threshold for change marks</div>
+              <div className="setting-description">Pixel threshold for change dots</div>
             </div>
             <div className="setting-control">
               <input
@@ -148,16 +144,6 @@ function ImageInspector({
                 data-testid="input-sensitivity"
               />
               <span className="sensitivity-value" data-testid="text-sensitivity">{sensitivity}</span>
-            </div>
-          </div>
-          <div className="setting">
-            <div>
-              <div className="setting-label">Difference overlay</div>
-              <div className="setting-description">Choose how changes are drawn</div>
-            </div>
-            <div className="overlay-choice" role="group" aria-label="Difference overlay style">
-              <button type="button" className={overlayMode === 'dots' ? 'active' : ''} onClick={() => setOverlayMode('dots')} aria-pressed={overlayMode === 'dots'} data-testid="button-overlay-dots">Dots</button>
-              <button type="button" className={overlayMode === 'markers' ? 'active' : ''} onClick={() => setOverlayMode('markers')} aria-pressed={overlayMode === 'markers'} data-testid="button-overlay-markers">Markers</button>
             </div>
           </div>
           <div className="setting">
@@ -178,7 +164,7 @@ function ImageInspector({
             <Info size={13} color="#55c8ec" /> READOUT
           </div>
           <p style={{ margin: '7px 0 0', color: '#617a84', fontSize: 10, lineHeight: 1.5 }}>
-            Blue indicates new or brighter V2 pixels. Red indicates removed or darker V2 pixels. Neighborhood filtering suppresses isolated compression noise.
+            Blue dots indicate new or brighter V2 pixels. Red dots indicate removed or darker V2 pixels. Neighborhood filtering suppresses isolated compression noise.
           </p>
         </div>
       </div>
@@ -191,15 +177,15 @@ export default function ImageComparePage() {
   const [versionTwo, setVersionTwo] = useState<ImageFile | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('split');
   const [sensitivity, setSensitivity] = useState(24);
-  const [overlayMode, setOverlayMode] = useState<DiffOverlayMode>('markers');
   const [isRendering, setIsRendering] = useState(false);
   const [mismatchWarning, setMismatchWarning] = useState(false);
-  const [wipePos, setWipePos] = useState(0.5);
+  // The wipe defaults to 80% closed / 20% open: most of the map shows the diff
+  // dots, with a sliver of the clean image revealed beyond the divider.
+  const [wipePos, setWipePos] = useState(0.8);
   const [announcement, setAnnouncement] = useState('Load two local image files to begin.');
   const imgOneRef = useRef<HTMLImageElement>(null);
   const imgTwoRef = useRef<HTMLImageElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const wipeRef = useRef<HTMLCanvasElement>(null);
   const objectUrls = useRef<string[]>([]);
   const draggingRef = useRef(false);
 
@@ -234,7 +220,9 @@ export default function ImageComparePage() {
     return () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
-  // Difference map.
+  // Difference map with an integrated wipe: the full diff (darkened V1 base +
+  // blue/red dots) is drawn everywhere, then the clean master image is revealed
+  // to the right of the divider so dragging wipes the dots off the image.
   useEffect(() => {
     if (viewMode !== 'diff' || !versionOne || !versionTwo) return;
     const canvas = canvasRef.current;
@@ -269,79 +257,35 @@ export default function ImageComparePage() {
     const a = ctxA.getImageData(0, 0, width, height);
     const b = ctxB.getImageData(0, 0, width, height);
 
-    const diff = renderDiffImage(a.data, b.data, width, height, sensitivity, overlayMode);
+    // Full difference map first.
+    const diff = renderDiffImage(a.data, b.data, width, height, sensitivity);
     output.drawImage(diff, 0, 0);
-    setIsRendering(false);
-  }, [viewMode, versionOne, versionTwo, sensitivity, overlayMode]);
 
-  // Wipe view — the diff map (marks composited over the master image) sits on
-  // the left of the divider and the clean master on the right, so dragging the
-  // divider wipes the dots / markers off the image and reveals the real pixels
-  // underneath. Recomputes when sensitivity or the overlay style changes.
-  useEffect(() => {
-    if (viewMode !== 'wipe' || !versionOne || !versionTwo) return;
-    const canvas = wipeRef.current;
-    const one = imgOneRef.current;
-    const two = imgTwoRef.current;
-    if (!canvas || !one || !two || !one.naturalWidth || !two.naturalWidth) return;
-
-    const aspectA = one.naturalWidth / one.naturalHeight;
-    const aspectB = two.naturalWidth / two.naturalHeight;
-    const width = 1000;
-    const aspect = (aspectA + aspectB) / 2 || 1;
-    const height = Math.max(2, Math.round(width / aspect));
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Contain-fit both versions once, at the same alignment as the diff map,
-    // so the marks line up with the image they describe.
-    const sourceA = document.createElement('canvas');
-    const sourceB = document.createElement('canvas');
-    sourceA.width = sourceB.width = width;
-    sourceA.height = sourceB.height = height;
-    const ctxA = sourceA.getContext('2d', { willReadFrequently: true });
-    const ctxB = sourceB.getContext('2d', { willReadFrequently: true });
-    if (!ctxA || !ctxB) return;
-    drawContain(ctxA, one, one.naturalWidth, one.naturalHeight, width, height);
-    drawContain(ctxB, two, two.naturalWidth, two.naturalHeight, width, height);
-    const a = ctxA.getImageData(0, 0, width, height);
-    const b = ctxB.getImageData(0, 0, width, height);
-    const overlay = renderDiffOverlay(
-      a.data,
-      b.data,
-      width,
-      height,
-      sensitivity,
-      overlayMode,
-    );
-
+    // Wipe reveal: clean master image to the right of the divider.
     const split = Math.round(wipePos * width);
-    // Right of the divider: the clean master image (marks wiped off).
-    ctx.drawImage(sourceA, 0, 0);
-    // Left of the divider: the master with the difference marks on top.
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 0, split, height);
-    ctx.clip();
-    ctx.drawImage(overlay, 0, 0);
-    ctx.restore();
+    output.save();
+    output.beginPath();
+    output.rect(split, 0, width - split, height);
+    output.clip();
+    output.drawImage(sourceA, 0, 0);
+    output.restore();
 
     // Divider + handle.
-    ctx.fillStyle = 'rgba(220, 240, 250, .92)';
-    ctx.fillRect(split - 1, 0, 2, height);
-    ctx.fillStyle = '#9be7ff';
-    ctx.beginPath();
-    ctx.arc(split, height / 2, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#123c4d';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }, [viewMode, versionOne, versionTwo, sensitivity, overlayMode, wipePos]);
+    output.fillStyle = 'rgba(220, 240, 250, .92)';
+    output.fillRect(split - 1, 0, 2, height);
+    output.fillStyle = '#9be7ff';
+    output.beginPath();
+    output.arc(split, height / 2, 7, 0, Math.PI * 2);
+    output.fill();
+    output.strokeStyle = '#123c4d';
+    output.lineWidth = 2;
+    output.stroke();
+
+    setIsRendering(false);
+  }, [viewMode, versionOne, versionTwo, sensitivity, wipePos]);
 
   const updateWipe = useCallback((clientX: number) => {
-    const canvas = wipeRef.current;
+    const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     setWipePos(Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)));
@@ -349,7 +293,7 @@ export default function ImageComparePage() {
 
   const reset = useCallback(() => {
     setViewMode('split');
-    setWipePos(0.5);
+    setWipePos(0.8);
     setAnnouncement('Comparison reset.');
   }, []);
 
@@ -361,7 +305,7 @@ export default function ImageComparePage() {
     <div className="app-shell dark">
       <TopBar
         active="image"
-        shortcuts={[['Drag', 'Drag the wipe divider to remove the difference marks'], ['← / →', 'Move the wipe divider']]}
+        shortcuts={[['Drag', 'Drag the wipe divider to reveal the clean image'], ['← / →', 'Move the wipe divider']]}
         aboutText="A focused local review surface for image version checks. Images are loaded with local object URLs and are never uploaded."
       />
 
@@ -387,11 +331,10 @@ export default function ImageComparePage() {
 
             <section className="viewer-frame" aria-label="Image comparison viewer">
               <div className="viewer-head">
-                <div className="viewer-title"><MonitorPlay size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/{viewMode === 'split' ? 'SPLIT' : viewMode === 'diff' ? 'DIFFERENCE MAP' : 'WIPE'}</span></div>
+                <div className="viewer-title"><MonitorPlay size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/{viewMode === 'split' ? 'SPLIT' : 'DIFFERENCE MAP'}</span></div>
                 <div className="view-switch" role="tablist" aria-label="Comparison view mode">
                   <button type="button" className={viewMode === 'split' ? 'active' : ''} onClick={() => setViewMode('split')} role="tab" aria-selected={viewMode === 'split'} data-testid="button-view-split">SPLIT</button>
                   <button type="button" className={viewMode === 'diff' ? 'active' : ''} onClick={() => setViewMode('diff')} role="tab" aria-selected={viewMode === 'diff'} data-testid="button-view-diff">DIFF MAP</button>
-                  <button type="button" className={viewMode === 'wipe' ? 'active' : ''} onClick={() => setViewMode('wipe')} role="tab" aria-selected={viewMode === 'wipe'} data-testid="button-view-wipe">WIPE</button>
                 </div>
               </div>
               <div className="compare-stage">
@@ -401,27 +344,11 @@ export default function ImageComparePage() {
                 </div>
                 {viewMode === 'diff' && hasImages ? (
                   <>
-                    <canvas ref={canvasRef} className="diff-canvas" aria-label="Difference map showing changed pixels" data-testid="canvas-difference-map" />
-                    {isRendering && (
-                      <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> SCORING PIXELS</div>
-                    )}
-                    {mismatchWarning && (
-                      <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
-                    )}
-                    <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span><span className="legend-mode">{overlayMode === 'dots' ? 'DOT VIEW' : 'MARKER VIEW'}</span></div>
-                  </>
-                ) : viewMode === 'diff' ? (
-                  <div className="empty-viewer">
-                    <div className="empty-inner"><div className="empty-glyph"><Layers3 size={19} /></div><div className="empty-title">Difference map is standing by</div><div className="empty-copy">Load both versions to calculate a pixel-level readout.</div></div>
-                  </div>
-                ) : null}
-                {viewMode === 'wipe' && hasImages ? (
-                  <>
                     <canvas
-                      ref={wipeRef}
-                      className="wipe-canvas"
-                      aria-label="Wipe comparison — drag the divider to wipe the difference marks off the master image"
-                      data-testid="canvas-wipe"
+                      ref={canvasRef}
+                      className="diff-canvas"
+                      aria-label="Difference map with wipe — drag the divider to wipe the dots off and reveal the clean image"
+                      data-testid="canvas-difference-map"
                       tabIndex={0}
                       style={{ cursor: 'ew-resize', touchAction: 'none', outline: 'none' }}
                       onPointerDown={(event) => {
@@ -439,17 +366,23 @@ export default function ImageComparePage() {
                         if (event.key === 'ArrowRight') setWipePos((p) => Math.min(1, p + 0.02));
                       }}
                     />
-                    <span className="pane-label">DIFF MARKS</span>
+                    <span className="pane-label">DIFF MAP</span>
                     <span className="pane-label" style={{ left: 'auto', right: 10 }}>CLEAN V1</span>
+                    {isRendering && (
+                      <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> SCORING PIXELS</div>
+                    )}
+                    {mismatchWarning && (
+                      <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
+                    )}
                     <div className="diff-legend">
                       <span><i className="legend-chip blue" />New / brighter</span>
                       <span><i className="legend-chip red" />Removed / darker</span>
-                      <span className="legend-mode">{overlayMode === 'dots' ? 'WIPE · DOT OVERLAY' : 'WIPE · MARKER OVERLAY'}</span>
+                      <span className="legend-mode">WIPE {Math.round(wipePos * 100)}% · {Math.round((1 - wipePos) * 100)}% OPEN</span>
                     </div>
                   </>
-                ) : viewMode === 'wipe' ? (
+                ) : viewMode === 'diff' ? (
                   <div className="empty-viewer">
-                    <div className="empty-inner"><div className="empty-glyph"><ImageIcon size={19} /></div><div className="empty-title">Wipe is standing by</div><div className="empty-copy">Load both versions, then drag the divider to wipe the difference marks off the image.</div></div>
+                    <div className="empty-inner"><div className="empty-glyph"><Layers3 size={19} /></div><div className="empty-title">Difference map is standing by</div><div className="empty-copy">Load both versions to calculate a pixel-level readout.</div></div>
                   </div>
                 ) : null}
               </div>
@@ -466,11 +399,11 @@ export default function ImageComparePage() {
                 <div style={{ padding: '13px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>
                   {viewMode === 'diff' && hasImages ? (
                     <>
-                      The map above is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Blue pixels are new or brighter in V2; red pixels are removed or darker. The markers overlay groups nearby changes into reviewable regions.
+                      The map above is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Blue dots are new or brighter in V2; red dots are removed or darker. Drag the wipe divider to reveal the clean master image and verify each dot against the real pixels underneath — it opens 20% by default.
                     </>
                   ) : (
                     <>
-                      Switch to <strong>Diff map</strong> for a pixel-level readout, or <strong>Wipe</strong> to drag the divider and wipe the difference marks off the master image — verify each mark against the real pixels underneath. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
+                      Switch to <strong>Diff map</strong> for a pixel-level readout with a built-in wipe: drag the divider to peel the blue/red dots off the image and check the underlying pixels. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
                     </>
                   )}
                 </div>
@@ -478,13 +411,13 @@ export default function ImageComparePage() {
               </section>
               <section className="panel" aria-label="Comparison settings">
                 <div className="panel-head"><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Settings2 size={14} color="#62cceb" /><span className="panel-heading">READOUT SETTINGS</span></div></div>
-                <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Choose dots for pixel-level inspection or markers for grouped regions. The live readout uses perceptual luminance/chroma scoring and neighborhood filtering.</div>
+                <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Changed pixels are flagged as dots on a darkened V1 base. The live readout uses perceptual luminance/chroma scoring and neighborhood filtering.</div>
                 <div style={{ borderTop: '1px solid #1e2f38', padding: '11px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}><AlertTriangle size={13} color="#d68568" style={{ flex: '0 0 auto', marginTop: 1 }} /><span style={{ color: '#927a6d', fontSize: 10, lineHeight: 1.45 }}>A global exposure difference is compensated automatically; localized differences are not.</span></div>
               </section>
             </div>
           </div>
         </main>
-        <ImageInspector sensitivity={sensitivity} setSensitivity={setSensitivity} overlayMode={overlayMode} setOverlayMode={setOverlayMode} hasImages={hasImages} onReset={reset} />
+        <ImageInspector sensitivity={sensitivity} setSensitivity={setSensitivity} hasImages={hasImages} onReset={reset} />
       </div>
 
       <div className="sr-only" role="status" aria-live="polite" data-testid="status-announcement">{announcement}</div>

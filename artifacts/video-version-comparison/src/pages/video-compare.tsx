@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 
 import { TopBar } from '@/components/topbar';
-import { drawContain, renderDiffImage, type DiffOverlayMode } from '@/lib/canvas';
+import { drawContain, renderDiffImage } from '@/lib/canvas';
 import { computeDiffCore, buildChangeEvents, formatTimecode, FPS, type ChangeEvent } from '../diff';
 
 type Version = 1 | 2;
@@ -178,15 +178,11 @@ function VideoPane({
 function Inspector({
   sensitivity,
   setSensitivity,
-  overlayMode,
-  setOverlayMode,
   hasVideos,
   onReset,
 }: {
   sensitivity: number;
   setSensitivity: (value: number) => void;
-  overlayMode: DiffOverlayMode;
-  setOverlayMode: (value: DiffOverlayMode) => void;
   hasVideos: boolean;
   onReset: () => void;
 }) {
@@ -218,16 +214,6 @@ function Inspector({
                 data-testid="input-sensitivity"
               />
               <span className="sensitivity-value" data-testid="text-sensitivity">{sensitivity}</span>
-            </div>
-          </div>
-          <div className="setting">
-            <div>
-              <div className="setting-label">Difference overlay</div>
-              <div className="setting-description">Choose how changes are drawn</div>
-            </div>
-            <div className="overlay-choice" role="group" aria-label="Difference overlay style">
-              <button type="button" className={overlayMode === 'dots' ? 'active' : ''} onClick={() => setOverlayMode('dots')} aria-pressed={overlayMode === 'dots'} data-testid="button-overlay-dots">Dots</button>
-              <button type="button" className={overlayMode === 'markers' ? 'active' : ''} onClick={() => setOverlayMode('markers')} aria-pressed={overlayMode === 'markers'} data-testid="button-overlay-markers">Markers</button>
             </div>
           </div>
           <div className="setting">
@@ -271,7 +257,6 @@ export default function VideoComparePage() {
   const [playing, setPlaying] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>('split');
   const [sensitivity, setSensitivity] = useState(24);
-  const [overlayMode, setOverlayMode] = useState<DiffOverlayMode>('markers');
   const [isRendering, setIsRendering] = useState(false);
   const [isRecomputing, setIsRecomputing] = useState(false);
   const [mismatchWarning, setMismatchWarning] = useState(false);
@@ -451,9 +436,9 @@ export default function VideoComparePage() {
     const a = ctxA.getImageData(0, 0, width, height);
     const b = ctxB.getImageData(0, 0, width, height);
 
-    const diff = renderDiffImage(a.data, b.data, width, height, sensitivity, overlayMode);
+    const diff = renderDiffImage(a.data, b.data, width, height, sensitivity);
     output.drawImage(diff, 0, 0);
-  }, [sensitivity, overlayMode]);
+  }, [sensitivity]);
 
   // Entering the difference map pauses playback: two independent <video> elements
   // cannot be frame-locked while playing, so a meaningful diff requires stopping.
@@ -600,7 +585,7 @@ export default function VideoComparePage() {
                     {mismatchWarning && (
                       <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
                     )}
-                    <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span><span className="legend-mode">{overlayMode === 'dots' ? 'DOT VIEW' : 'MARKER VIEW'}</span></div>
+                    <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span></div>
                   </>
                 ) : viewMode === 'diff' ? (
                   <div className="empty-viewer">
@@ -653,13 +638,13 @@ export default function VideoComparePage() {
               </section>
               <section className="panel" aria-label="Comparison settings">
                 <div className="panel-head"><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Settings2 size={14} color="#62cceb" /><span className="panel-heading">READOUT SETTINGS</span></div></div>
-                 <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Choose dots for pixel-level inspection or markers for grouped regions. The live readout uses perceptual luminance/chroma scoring and neighborhood filtering.</div>
+                 <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Changed pixels are flagged as dots on a darkened V1 base. The live readout uses perceptual luminance/chroma scoring and neighborhood filtering.</div>
                 <div style={{ borderTop: '1px solid #1e2f38', padding: '11px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}><AlertTriangle size={13} color="#d68568" style={{ flex: '0 0 auto', marginTop: 1 }} /><span style={{ color: '#927a6d', fontSize: 10, lineHeight: 1.45 }}>Pixel comparison is a visual aid, not a substitute for a calibrated review.</span></div>
               </section>
             </div>
           </div>
         </main>
-        <Inspector sensitivity={sensitivity} setSensitivity={setSensitivity} overlayMode={overlayMode} setOverlayMode={setOverlayMode} hasVideos={hasVideos} onReset={reset} />
+        <Inspector sensitivity={sensitivity} setSensitivity={setSensitivity} hasVideos={hasVideos} onReset={reset} />
       </div>
       {versionOne && versionTwo && (
         <div aria-hidden="true" style={{ position: 'absolute', left: -99999, top: 0, width: 1, height: 1, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}>
