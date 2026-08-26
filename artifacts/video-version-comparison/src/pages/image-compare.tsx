@@ -221,8 +221,9 @@ export default function ImageComparePage() {
   }, []);
 
   // Difference map with an integrated wipe: the full diff (darkened V1 base +
-  // blue/red dots) is drawn everywhere, then the clean master image is revealed
-  // to the right of the divider so dragging wipes the dots off the image.
+  // blue/red dots) is drawn everywhere, then the submitted version (V2) is
+  // revealed to the right of the divider so dragging wipes the dots off and
+  // shows what V2 actually looks like at each change.
   useEffect(() => {
     if (viewMode !== 'diff' || !versionOne || !versionTwo) return;
     const canvas = canvasRef.current;
@@ -261,13 +262,13 @@ export default function ImageComparePage() {
     const diff = renderDiffImage(a.data, b.data, width, height, sensitivity);
     output.drawImage(diff, 0, 0);
 
-    // Wipe reveal: clean master image to the right of the divider.
+    // Wipe reveal: submitted version (V2) to the right of the divider.
     const split = Math.round(wipePos * width);
     output.save();
     output.beginPath();
     output.rect(split, 0, width - split, height);
     output.clip();
-    output.drawImage(sourceA, 0, 0);
+    output.drawImage(sourceB, 0, 0);
     output.restore();
 
     // Divider + handle.
@@ -337,49 +338,59 @@ export default function ImageComparePage() {
                   <button type="button" className={viewMode === 'diff' ? 'active' : ''} onClick={() => setViewMode('diff')} role="tab" aria-selected={viewMode === 'diff'} data-testid="button-view-diff">DIFF MAP</button>
                 </div>
               </div>
-              <div className="compare-stage">
+              <div className="compare-stage" style={viewMode === 'diff' && hasImages ? { aspectRatio: 'auto', height: 'min(600px, 66vh)' } : undefined}>
                 <div className="video-grid" style={{ display: viewMode === 'split' ? 'grid' : 'none' }}>
                   <ImagePane version={1} image={versionOne} imgRef={imgOneRef} />
                   <ImagePane version={2} image={versionTwo} imgRef={imgTwoRef} />
                 </div>
                 {viewMode === 'diff' && hasImages ? (
-                  <>
-                    <canvas
-                      ref={canvasRef}
-                      className="diff-canvas"
-                      aria-label="Difference map with wipe — drag the divider to wipe the dots off and reveal the clean image"
-                      data-testid="canvas-difference-map"
-                      tabIndex={0}
-                      style={{ cursor: 'ew-resize', touchAction: 'none', outline: 'none' }}
-                      onPointerDown={(event) => {
-                        draggingRef.current = true;
-                        (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
-                        updateWipe(event.clientX);
-                      }}
-                      onPointerMove={(event) => {
-                        if (draggingRef.current) updateWipe(event.clientX);
-                      }}
-                      onPointerUp={() => { draggingRef.current = false; }}
-                      onPointerCancel={() => { draggingRef.current = false; }}
-                      onKeyDown={(event) => {
-                        if (event.key === 'ArrowLeft') setWipePos((p) => Math.max(0, p - 0.02));
-                        if (event.key === 'ArrowRight') setWipePos((p) => Math.min(1, p + 0.02));
-                      }}
-                    />
-                    <span className="pane-label">DIFF MAP</span>
-                    <span className="pane-label" style={{ left: 'auto', right: 10 }}>CLEAN V1</span>
-                    {isRendering && (
-                      <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> SCORING PIXELS</div>
-                    )}
-                    {mismatchWarning && (
-                      <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
-                    )}
-                    <div className="diff-legend">
-                      <span><i className="legend-chip blue" />New / brighter</span>
-                      <span><i className="legend-chip red" />Removed / darker</span>
-                      <span className="legend-mode">WIPE {Math.round(wipePos * 100)}% · {Math.round((1 - wipePos) * 100)}% OPEN</span>
+                  <div className="diff-split">
+                    <div className="diff-split-v1">
+                      <span className="pane-label">V1 · MASTER</span>
+                      <img src={versionOne?.url} alt="Version 1 image" data-testid="diff-pane-v1" />
                     </div>
-                  </>
+                    <div className="diff-split-right">
+                      <canvas
+                        ref={canvasRef}
+                        className="diff-canvas"
+                        aria-label="Difference map with wipe — drag the divider to wipe the dots off and reveal the submitted version"
+                        data-testid="canvas-difference-map"
+                        tabIndex={0}
+                        style={{ cursor: 'ew-resize', touchAction: 'none', outline: 'none' }}
+                        onPointerDown={(event) => {
+                          draggingRef.current = true;
+                          (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
+                          updateWipe(event.clientX);
+                        }}
+                        onPointerMove={(event) => {
+                          if (draggingRef.current) updateWipe(event.clientX);
+                        }}
+                        onPointerUp={() => { draggingRef.current = false; }}
+                        onPointerCancel={() => { draggingRef.current = false; }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'ArrowLeft') setWipePos((p) => Math.max(0, p - 0.02));
+                          if (event.key === 'ArrowRight') setWipePos((p) => Math.min(1, p + 0.02));
+                        }}
+                      />
+                      <span className="pane-label">DIFF MAP</span>
+                      <span className="pane-label" style={{ left: 'auto', right: 10 }}>REVEAL V2</span>
+                      {isRendering && (
+                        <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> SCORING PIXELS</div>
+                      )}
+                      {mismatchWarning && (
+                        <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
+                      )}
+                      <div className="diff-legend">
+                        <span><i className="legend-chip blue" />New / brighter</span>
+                        <span><i className="legend-chip red" />Removed / darker</span>
+                        <span className="legend-mode">WIPE {Math.round(wipePos * 100)}% · {Math.round((1 - wipePos) * 100)}% OPEN</span>
+                      </div>
+                    </div>
+                    <div className="diff-split-bottom">
+                      <span className="pane-label version-two">V2 · SUBMITTED</span>
+                      <img src={versionTwo?.url} alt="Version 2 image" data-testid="diff-pane-v2" />
+                    </div>
+                  </div>
                 ) : viewMode === 'diff' ? (
                   <div className="empty-viewer">
                     <div className="empty-inner"><div className="empty-glyph"><Layers3 size={19} /></div><div className="empty-title">Difference map is standing by</div><div className="empty-copy">Load both versions to calculate a pixel-level readout.</div></div>
@@ -399,11 +410,11 @@ export default function ImageComparePage() {
                 <div style={{ padding: '13px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>
                   {viewMode === 'diff' && hasImages ? (
                     <>
-                      The map above is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Blue dots are new or brighter in V2; red dots are removed or darker. Drag the wipe divider to reveal the clean master image and verify each dot against the real pixels underneath — it opens 20% by default.
+                      The master sits on the left, the difference map (darkened V1 with blue/red dots) on the right, and the submitted version below. The map is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Drag the wipe divider to reveal the submitted pixels under the dots — it opens 20% by default.
                     </>
                   ) : (
                     <>
-                      Switch to <strong>Diff map</strong> for a pixel-level readout with a built-in wipe: drag the divider to peel the blue/red dots off the image and check the underlying pixels. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
+                      Switch to <strong>Diff map</strong> for a split review: the master on the left, the pixel-level difference readout with a built-in wipe on the right, and the submitted version underneath. Drag the divider to peel the blue/red dots off and check the underlying pixels. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
                     </>
                   )}
                 </div>
