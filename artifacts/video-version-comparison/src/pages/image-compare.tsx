@@ -338,7 +338,7 @@ export default function ImageComparePage() {
                   <button type="button" className={viewMode === 'diff' ? 'active' : ''} onClick={() => setViewMode('diff')} role="tab" aria-selected={viewMode === 'diff'} data-testid="button-view-diff">DIFF MAP</button>
                 </div>
               </div>
-              <div className="compare-stage" style={viewMode === 'diff' && hasImages ? { aspectRatio: 'auto', height: 'min(600px, 66vh)' } : undefined}>
+              <div className="compare-stage">
                 <div className="video-grid" style={{ display: viewMode === 'split' ? 'grid' : 'none' }}>
                   <ImagePane version={1} image={versionOne} imgRef={imgOneRef} />
                   <ImagePane version={2} image={versionTwo} imgRef={imgTwoRef} />
@@ -386,10 +386,6 @@ export default function ImageComparePage() {
                         <span className="legend-mode">WIPE {Math.round(wipePos * 100)}% · {Math.round((1 - wipePos) * 100)}% OPEN</span>
                       </div>
                     </div>
-                    <div className="diff-split-bottom">
-                      <span className="pane-label version-two">V2 · SUBMITTED</span>
-                      <img src={versionTwo?.url} alt="Version 2 image" data-testid="diff-pane-v2" />
-                    </div>
                   </div>
                 ) : viewMode === 'diff' ? (
                   <div className="empty-viewer">
@@ -410,11 +406,11 @@ export default function ImageComparePage() {
                 <div style={{ padding: '13px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>
                   {viewMode === 'diff' && hasImages ? (
                     <>
-                      The master sits on the left, the difference map (darkened V1 with blue/red dots) on the right, and the submitted version below. The map is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Drag the wipe divider to reveal the submitted pixels under the dots — it opens 20% by default.
+                      The master sits on the left, the difference map (darkened V1 with blue/red dots) on the right. The map is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Drag the wipe divider to reveal the submitted pixels under the dots — it opens 20% by default.
                     </>
                   ) : (
                     <>
-                      Switch to <strong>Diff map</strong> for a split review: the master on the left, the pixel-level difference readout with a built-in wipe on the right, and the submitted version underneath. Drag the divider to peel the blue/red dots off and check the underlying pixels. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
+                      Switch to <strong>Diff map</strong> for a split review: the master on the left and the pixel-level difference readout with a built-in wipe on the right. Drag the divider to peel the blue/red dots off and check the underlying pixels. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
                     </>
                   )}
                 </div>
