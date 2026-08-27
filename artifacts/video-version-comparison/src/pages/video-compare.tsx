@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
-  FileVideo,
   Film,
   Gauge,
   Info,
@@ -27,7 +25,6 @@ import { drawContain, renderDiffImage } from '@/lib/canvas';
 import { computeDiffCore, buildChangeEvents, formatTimecode, FPS, type ChangeEvent } from '../diff';
 
 type Version = 1 | 2;
-type ViewMode = 'split' | 'diff';
 type VideoFile = { file: File; url: string; duration: number; width: number; height: number };
 
 const fileSize = (bytes: number) => {
@@ -148,33 +145,6 @@ function DropZone({
   );
 }
 
-function VideoPane({
-  version,
-  video,
-  videoRef,
-}: {
-  version: Version;
-  video: VideoFile | null;
-  videoRef: React.RefObject<HTMLVideoElement | null>;
-}) {
-  return (
-    <div className="video-pane">
-      <span className={`pane-label ${version === 2 ? 'version-two' : ''}`}>V{version} · {version === 1 ? 'MASTER' : 'SUBMITTED'}</span>
-      {video ? (
-        <video ref={videoRef} src={video.url} preload="metadata" playsInline aria-label={`Version ${version} video`} data-testid={`video-version-${version}`} />
-      ) : (
-        <div className="empty-viewer">
-          <div className="empty-inner">
-            <div className="empty-glyph"><FileVideo size={19} /></div>
-            <div className="empty-title">Awaiting Version {version}</div>
-            <div className="empty-copy">Load a local video above to place it in the comparison viewer.</div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function Inspector({
   sensitivity,
   setSensitivity,
@@ -200,7 +170,7 @@ function Inspector({
           <div className="setting">
             <div>
               <div className="setting-label">Difference sensitivity</div>
-              <div className="setting-description">Pixel threshold for change marks</div>
+              <div className="setting-description">Pixel threshold for change dots</div>
             </div>
             <div className="setting-control">
               <input
@@ -255,11 +225,13 @@ export default function VideoComparePage() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
   const [sensitivity, setSensitivity] = useState(24);
   const [isRendering, setIsRendering] = useState(false);
   const [isRecomputing, setIsRecomputing] = useState(false);
   const [mismatchWarning, setMismatchWarning] = useState(false);
+  // The wipe defaults to 80% closed / 20% open: most of the map shows the diff
+  // dots, with a sliver of the submitted version revealed beyond the divider.
+  const [wipePos, setWipePos] = useState(0.8);
   const [announcement, setAnnouncement] = useState('Load two local video files to begin.');
   const [changeEvents, setChangeEvents] = useState<ChangeEvent[]>([]);
   const videoOneRef = useRef<HTMLVideoElement>(null);
@@ -270,6 +242,7 @@ export default function VideoComparePage() {
   const computeSeqRef = useRef(0);
   const debounceRef = useRef<number | null>(null);
   const objectUrls = useRef<string[]>([]);
+  const draggingRef = useRef(false);
 
   const hasVideos = Boolean(versionOne && versionTwo);
   const loadedCount = Number(Boolean(versionOne)) + Number(Boolean(versionTwo));
@@ -406,6 +379,8 @@ export default function VideoComparePage() {
     };
   }, [hasVideos, versionOne, versionTwo, sensitivity]);
 
+  // Draw the live diff map into the right pane: full diff (darkened V1 + dots),
+  // then the submitted version (V2) revealed to the right of the wipe divider.
   const drawDifference = useCallback(() => {
     const canvas = canvasRef.current;
     const one = videoOneRef.current;
@@ -436,23 +411,36 @@ export default function VideoComparePage() {
     const a = ctxA.getImageData(0, 0, width, height);
     const b = ctxB.getImageData(0, 0, width, height);
 
+    // Full difference map first.
     const diff = renderDiffImage(a.data, b.data, width, height, sensitivity);
     output.drawImage(diff, 0, 0);
-  }, [sensitivity]);
 
-  // Entering the difference map pauses playback: two independent <video> elements
-  // cannot be frame-locked while playing, so a meaningful diff requires stopping.
-  useEffect(() => {
-    if (viewMode !== 'diff') return;
-    setPlaying(false);
-    videoOneRef.current?.pause();
-    videoTwoRef.current?.pause();
-  }, [viewMode]);
+    // Wipe reveal: submitted version (V2) to the right of the divider.
+    const split = Math.round(wipePos * width);
+    output.save();
+    output.beginPath();
+    output.rect(split, 0, width - split, height);
+    output.clip();
+    output.drawImage(sourceB, 0, 0);
+    output.restore();
 
-  // Recompute the difference map only on a frame-locked pair. Debounced so seek
-  // scrubbing coalesces; a per-request token drops stale async results.
+    // Divider + handle.
+    output.fillStyle = 'rgba(220, 240, 250, .92)';
+    output.fillRect(split - 1, 0, 2, height);
+    output.fillStyle = '#9be7ff';
+    output.beginPath();
+    output.arc(split, height / 2, 7, 0, Math.PI * 2);
+    output.fill();
+    output.strokeStyle = '#123c4d';
+    output.lineWidth = 2;
+    output.stroke();
+  }, [sensitivity, wipePos]);
+
+  // Recompute the difference map on a frame-locked pair. Debounced so seek
+  // scrubbing coalesces; a per-request token drops stale async results. During
+  // playback this fires between timeupdate events, so the map tracks the playhead.
   useEffect(() => {
-    if (viewMode !== 'diff' || !hasVideos) return;
+    if (!hasVideos) return;
     const one = videoOneRef.current;
     const two = videoTwoRef.current;
     if (!one || !two) return;
@@ -470,7 +458,21 @@ export default function VideoComparePage() {
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [viewMode, hasVideos, currentTime, duration, drawDifference]);
+  }, [hasVideos, currentTime, duration, drawDifference]);
+
+  // Redraw instantly on wipe drag / sensitivity change without seeking — the
+  // current frames are already painted, only the divider moved.
+  useEffect(() => {
+    if (!hasVideos) return;
+    drawDifference();
+  }, [wipePos, sensitivity, hasVideos, drawDifference]);
+
+  const updateWipe = useCallback((clientX: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    setWipePos(Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)));
+  }, []);
 
   const togglePlayback = useCallback(() => {
     const one = videoOneRef.current;
@@ -513,13 +515,15 @@ export default function VideoComparePage() {
     videoOneRef.current?.pause();
     videoTwoRef.current?.pause();
     seek(0);
-    setViewMode('split');
+    setWipePos(0.8);
     setAnnouncement('Comparison reset to first frame.');
   }, [seek]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement) return;
+      // The diff canvas owns the arrow keys for the wipe divider.
+      if (event.target instanceof HTMLCanvasElement) return;
       if (event.code === 'Space') { event.preventDefault(); togglePlayback(); }
       if (event.code === 'ArrowLeft') step(-1);
       if (event.code === 'ArrowRight') step(1);
@@ -534,12 +538,13 @@ export default function VideoComparePage() {
   const dimensions = versionOne && versionTwo
     ? `${versionOne.width || 1920} × ${versionOne.height || 1080}`
     : '—';
+  const showAligning = isRecomputing && !playing;
 
   return (
     <div className="app-shell dark">
       <TopBar
         active="video"
-        shortcuts={[['Space', 'Play / pause synchronized playback'], ['← / →', 'Step one frame backward / forward'], ['Home', 'Return to first frame']]}
+        shortcuts={[['Space', 'Play / pause synchronized playback'], ['← / →', 'Step one frame backward / forward'], ['Home', 'Return to first frame'], ['Drag', 'Drag the wipe divider to reveal the submitted version']]}
         aboutText="A focused local review surface for editorial video version checks. Video files are loaded with local object URLs and are never uploaded."
       />
 
@@ -553,7 +558,6 @@ export default function VideoComparePage() {
             </div>
             <div className="header-actions">
               <button type="button" className="button" onClick={reset} disabled={!hasVideos} data-testid="button-header-reset"><RotateCcw size={13} /> Reset</button>
-              <button type="button" className="button primary" onClick={() => setViewMode('diff')} disabled={!hasVideos} data-testid="button-open-diff"><Activity size={13} /> Inspect differences</button>
             </div>
           </div>
 
@@ -565,33 +569,62 @@ export default function VideoComparePage() {
 
             <section className="viewer-frame" aria-label="Video comparison viewer">
               <div className="viewer-head">
-                <div className="viewer-title"><MonitorPlay size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/{viewMode === 'split' ? 'SPLIT' : 'DIFFERENCE MAP'}</span></div>
-                <div className="view-switch" role="tablist" aria-label="Comparison view mode">
-                  <button type="button" className={viewMode === 'split' ? 'active' : ''} onClick={() => setViewMode('split')} role="tab" aria-selected={viewMode === 'split'} data-testid="button-view-split">SPLIT</button>
-                  <button type="button" className={viewMode === 'diff' ? 'active' : ''} onClick={() => setViewMode('diff')} role="tab" aria-selected={viewMode === 'diff'} data-testid="button-view-diff">DIFF MAP</button>
-                </div>
+                <div className="viewer-title"><MonitorPlay size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/DIFF MAP</span></div>
               </div>
               <div className="compare-stage">
-                <div className="video-grid" style={{ display: viewMode === 'split' ? 'grid' : 'none' }}>
-                  <VideoPane version={1} video={versionOne} videoRef={videoOneRef} />
-                  <VideoPane version={2} video={versionTwo} videoRef={videoTwoRef} />
-                </div>
-                {viewMode === 'diff' && hasVideos ? (
-                  <>
-                    <canvas ref={canvasRef} className="diff-canvas" aria-label="Difference map showing changed pixels" data-testid="canvas-difference-map" />
-                    {isRecomputing && (
-                      <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> ALIGNING FRAMES</div>
-                    )}
-                    {mismatchWarning && (
-                      <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
-                    )}
-                    <div className="diff-legend"><span><i className="legend-chip blue" />New / brighter</span><span><i className="legend-chip red" />Removed / darker</span></div>
-                  </>
-                ) : viewMode === 'diff' ? (
-                  <div className="empty-viewer">
-                    <div className="empty-inner"><div className="empty-glyph"><Layers3 size={19} /></div><div className="empty-title">Difference map is standing by</div><div className="empty-copy">Load both versions to calculate a pixel-level readout.</div></div>
+                {hasVideos ? (
+                  <div className="diff-split">
+                    <div className="diff-split-v1">
+                      <span className="pane-label">V1 · MASTER</span>
+                      <video ref={videoOneRef} src={versionOne?.url} preload="auto" playsInline aria-label="Version 1 video" data-testid="video-version-1" />
+                    </div>
+                    <div className="diff-split-right">
+                      <canvas
+                        ref={canvasRef}
+                        className="diff-canvas"
+                        aria-label="Difference map with wipe — drag the divider to wipe the dots off and reveal the submitted version"
+                        data-testid="canvas-difference-map"
+                        tabIndex={0}
+                        style={{ cursor: 'ew-resize', touchAction: 'none', outline: 'none' }}
+                        onPointerDown={(event) => {
+                          draggingRef.current = true;
+                          (event.currentTarget as HTMLCanvasElement).setPointerCapture(event.pointerId);
+                          updateWipe(event.clientX);
+                        }}
+                        onPointerMove={(event) => {
+                          if (draggingRef.current) updateWipe(event.clientX);
+                        }}
+                        onPointerUp={() => { draggingRef.current = false; }}
+                        onPointerCancel={() => { draggingRef.current = false; }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'ArrowLeft') setWipePos((p) => Math.max(0, p - 0.02));
+                          if (event.key === 'ArrowRight') setWipePos((p) => Math.min(1, p + 0.02));
+                        }}
+                      />
+                      <span className="pane-label">DIFF MAP</span>
+                      <span className="pane-label" style={{ left: 'auto', right: 10 }}>REVEAL V2</span>
+                      {showAligning && (
+                        <div className="diff-recompute" data-testid="status-recomputing"><i className="pulse" /> ALIGNING FRAMES</div>
+                      )}
+                      {mismatchWarning && (
+                        <div className="diff-mismatch" data-testid="status-mismatch"><AlertTriangle size={11} /> Aspect ratios differ — alignment is approximate</div>
+                      )}
+                      <div className="diff-legend">
+                        <span><i className="legend-chip blue" />New / brighter</span>
+                        <span><i className="legend-chip red" />Removed / darker</span>
+                        <span className="legend-mode">WIPE {Math.round(wipePos * 100)}% · {Math.round((1 - wipePos) * 100)}% OPEN</span>
+                      </div>
+                    </div>
                   </div>
-                ) : null}
+                ) : (
+                  <div className="empty-viewer">
+                    <div className="empty-inner">
+                      <div className="empty-glyph"><Layers3 size={19} /></div>
+                      <div className="empty-title">Comparison viewer is standing by</div>
+                      <div className="empty-copy">Load both versions to see the master next to a live difference map.</div>
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="viewer-foot">
                 <span><strong>{loadedCount}/2</strong> versions loaded</span>
@@ -638,7 +671,7 @@ export default function VideoComparePage() {
               </section>
               <section className="panel" aria-label="Comparison settings">
                 <div className="panel-head"><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Settings2 size={14} color="#62cceb" /><span className="panel-heading">READOUT SETTINGS</span></div></div>
-                 <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>Changed pixels are flagged as dots on a darkened V1 base. The live readout uses perceptual luminance/chroma scoring and neighborhood filtering.</div>
+                 <div style={{ padding: '11px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>The master plays on the left; the right pane shows a live difference map (darkened V1 with change dots) at the same frame. Drag the wipe divider to reveal the submitted frame under the dots — it opens 20% by default.</div>
                 <div style={{ borderTop: '1px solid #1e2f38', padding: '11px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}><AlertTriangle size={13} color="#d68568" style={{ flex: '0 0 auto', marginTop: 1 }} /><span style={{ color: '#927a6d', fontSize: 10, lineHeight: 1.45 }}>Pixel comparison is a visual aid, not a substitute for a calibrated review.</span></div>
               </section>
             </div>
@@ -648,6 +681,7 @@ export default function VideoComparePage() {
       </div>
       {versionOne && versionTwo && (
         <div aria-hidden="true" style={{ position: 'absolute', left: -99999, top: 0, width: 1, height: 1, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}>
+          <video ref={videoTwoRef} src={versionTwo.url} playsInline preload="auto" data-testid="video-version-2-hidden" />
           <video ref={scanOneRef} src={versionOne.url} muted playsInline preload="auto" data-testid="video-scan-1" />
           <video ref={scanTwoRef} src={versionTwo.url} muted playsInline preload="auto" data-testid="video-scan-2" />
         </div>
