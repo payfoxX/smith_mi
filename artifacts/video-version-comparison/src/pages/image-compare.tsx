@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity,
   AlertTriangle,
   Gauge,
   Image as ImageIcon,
@@ -19,7 +18,6 @@ import { TopBar } from '@/components/topbar';
 import { drawContain, renderDiffImage } from '@/lib/canvas';
 
 type Version = 1 | 2;
-type ViewMode = 'split' | 'diff';
 type ImageFile = { file: File; url: string; width: number; height: number };
 
 const fileSize = (bytes: number) => {
@@ -73,33 +71,6 @@ function DropZone({
         </button>
       ) : (
         <span className="drop-hint">Local only</span>
-      )}
-    </div>
-  );
-}
-
-function ImagePane({
-  version,
-  image,
-  imgRef,
-}: {
-  version: Version;
-  image: ImageFile | null;
-  imgRef: React.RefObject<HTMLImageElement | null>;
-}) {
-  return (
-    <div className="video-pane">
-      <span className={`pane-label ${version === 2 ? 'version-two' : ''}`}>V{version} · {version === 1 ? 'MASTER' : 'SUBMITTED'}</span>
-      {image ? (
-        <img ref={imgRef} src={image.url} alt={`Version ${version} image`} data-testid={`image-version-${version}`} />
-      ) : (
-        <div className="empty-viewer">
-          <div className="empty-inner">
-            <div className="empty-glyph"><ImageIcon size={19} /></div>
-            <div className="empty-title">Awaiting Version {version}</div>
-            <div className="empty-copy">Load a local image above to place it in the comparison viewer.</div>
-          </div>
-        </div>
       )}
     </div>
   );
@@ -175,13 +146,13 @@ function ImageInspector({
 export default function ImageComparePage() {
   const [versionOne, setVersionOne] = useState<ImageFile | null>(null);
   const [versionTwo, setVersionTwo] = useState<ImageFile | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
   const [sensitivity, setSensitivity] = useState(24);
   const [isRendering, setIsRendering] = useState(false);
   const [mismatchWarning, setMismatchWarning] = useState(false);
   // The wipe defaults to 80% closed / 20% open: most of the map shows the diff
-  // dots, with a sliver of the clean image revealed beyond the divider.
+  // dots, with a sliver of the submitted version revealed beyond the divider.
   const [wipePos, setWipePos] = useState(0.8);
+  const [loadTick, setLoadTick] = useState(0);
   const [announcement, setAnnouncement] = useState('Load two local image files to begin.');
   const imgOneRef = useRef<HTMLImageElement>(null);
   const imgTwoRef = useRef<HTMLImageElement>(null);
@@ -220,12 +191,12 @@ export default function ImageComparePage() {
     return () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
-  // Difference map with an integrated wipe: the full diff (darkened V1 base +
-  // blue/red dots) is drawn everywhere, then the submitted version (V2) is
-  // revealed to the right of the divider so dragging wipes the dots off and
+  // Difference map split with an integrated wipe: the full diff (darkened V1
+  // base + blue/red dots) fills the right pane, then the submitted version (V2)
+  // is revealed to the right of the divider so dragging wipes the dots off and
   // shows what V2 actually looks like at each change.
   useEffect(() => {
-    if (viewMode !== 'diff' || !versionOne || !versionTwo) return;
+    if (!versionOne || !versionTwo) return;
     const canvas = canvasRef.current;
     const one = imgOneRef.current;
     const two = imgTwoRef.current;
@@ -283,7 +254,7 @@ export default function ImageComparePage() {
     output.stroke();
 
     setIsRendering(false);
-  }, [viewMode, versionOne, versionTwo, sensitivity, wipePos]);
+  }, [versionOne, versionTwo, sensitivity, wipePos, loadTick]);
 
   const updateWipe = useCallback((clientX: number) => {
     const canvas = canvasRef.current;
@@ -293,7 +264,6 @@ export default function ImageComparePage() {
   }, []);
 
   const reset = useCallback(() => {
-    setViewMode('split');
     setWipePos(0.8);
     setAnnouncement('Comparison reset.');
   }, []);
@@ -306,7 +276,7 @@ export default function ImageComparePage() {
     <div className="app-shell dark">
       <TopBar
         active="image"
-        shortcuts={[['Drag', 'Drag the wipe divider to reveal the clean image'], ['← / →', 'Move the wipe divider']]}
+        shortcuts={[['Drag', 'Drag the wipe divider to reveal the submitted version'], ['← / →', 'Move the wipe divider']]}
         aboutText="A focused local review surface for image version checks. Images are loaded with local object URLs and are never uploaded."
       />
 
@@ -320,7 +290,6 @@ export default function ImageComparePage() {
             </div>
             <div className="header-actions">
               <button type="button" className="button" onClick={reset} disabled={!hasImages} data-testid="button-header-reset"><RotateCcw size={13} /> Reset</button>
-              <button type="button" className="button primary" onClick={() => setViewMode('diff')} disabled={!hasImages} data-testid="button-open-diff"><Activity size={13} /> Inspect differences</button>
             </div>
           </div>
 
@@ -332,22 +301,14 @@ export default function ImageComparePage() {
 
             <section className="viewer-frame" aria-label="Image comparison viewer">
               <div className="viewer-head">
-                <div className="viewer-title"><MonitorPlay size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/{viewMode === 'split' ? 'SPLIT' : 'DIFFERENCE MAP'}</span></div>
-                <div className="view-switch" role="tablist" aria-label="Comparison view mode">
-                  <button type="button" className={viewMode === 'split' ? 'active' : ''} onClick={() => setViewMode('split')} role="tab" aria-selected={viewMode === 'split'} data-testid="button-view-split">SPLIT</button>
-                  <button type="button" className={viewMode === 'diff' ? 'active' : ''} onClick={() => setViewMode('diff')} role="tab" aria-selected={viewMode === 'diff'} data-testid="button-view-diff">DIFF MAP</button>
-                </div>
+                <div className="viewer-title"><MonitorPlay size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/DIFF MAP</span></div>
               </div>
               <div className="compare-stage">
-                <div className="video-grid" style={{ display: viewMode === 'split' ? 'grid' : 'none' }}>
-                  <ImagePane version={1} image={versionOne} imgRef={imgOneRef} />
-                  <ImagePane version={2} image={versionTwo} imgRef={imgTwoRef} />
-                </div>
-                {viewMode === 'diff' && hasImages ? (
+                {hasImages ? (
                   <div className="diff-split">
                     <div className="diff-split-v1">
                       <span className="pane-label">V1 · MASTER</span>
-                      <img src={versionOne?.url} alt="Version 1 image" data-testid="diff-pane-v1" />
+                      <img ref={imgOneRef} src={versionOne?.url} onLoad={() => setLoadTick((t) => t + 1)} alt="Version 1 image" data-testid="diff-pane-v1" />
                     </div>
                     <div className="diff-split-right">
                       <canvas
@@ -387,11 +348,15 @@ export default function ImageComparePage() {
                       </div>
                     </div>
                   </div>
-                ) : viewMode === 'diff' ? (
+                ) : (
                   <div className="empty-viewer">
-                    <div className="empty-inner"><div className="empty-glyph"><Layers3 size={19} /></div><div className="empty-title">Difference map is standing by</div><div className="empty-copy">Load both versions to calculate a pixel-level readout.</div></div>
+                    <div className="empty-inner">
+                      <div className="empty-glyph"><Layers3 size={19} /></div>
+                      <div className="empty-title">Difference map is standing by</div>
+                      <div className="empty-copy">Load both versions to compare the master against the submitted image.</div>
+                    </div>
                   </div>
-                ) : null}
+                )}
               </div>
               <div className="viewer-foot">
                 <span><strong>{loadedCount}/2</strong> versions loaded</span>
@@ -404,15 +369,7 @@ export default function ImageComparePage() {
               <section className="panel" aria-label="Difference summary">
                 <div className="panel-head"><div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Gauge size={14} color="#62cceb" /><span className="panel-heading">DIFFERENCE SUMMARY</span></div></div>
                 <div style={{ padding: '13px 12px', color: '#677d86', fontSize: 10, lineHeight: 1.55 }}>
-                  {viewMode === 'diff' && hasImages ? (
-                    <>
-                      The master sits on the left, the difference map (darkened V1 with blue/red dots) on the right. The map is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Drag the wipe divider to reveal the submitted pixels under the dots — it opens 20% by default.
-                    </>
-                  ) : (
-                    <>
-                      Switch to <strong>Diff map</strong> for a split review: the master on the left and the pixel-level difference readout with a built-in wipe on the right. Drag the divider to peel the blue/red dots off and check the underlying pixels. Both images are contain-fit to the same canvas so differing aspect ratios stay aligned.
-                    </>
-                  )}
+                  The master sits on the left, the difference map (darkened V1 with blue/red dots) on the right. The map is computed at a fixed 1000px analysis width with contain-fit alignment, so both files are compared at the same scale. Drag the wipe divider to reveal the submitted pixels under the dots — it opens 20% by default.
                 </div>
                 <div style={{ borderTop: '1px solid #1e2f38', padding: '11px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}><AlertTriangle size={13} color="#d68568" style={{ flex: '0 0 auto', marginTop: 1 }} /><span style={{ color: '#927a6d', fontSize: 10, lineHeight: 1.45 }}>Pixel comparison is a visual aid, not a substitute for a calibrated review.</span></div>
               </section>
@@ -428,6 +385,9 @@ export default function ImageComparePage() {
       </div>
 
       <div className="sr-only" role="status" aria-live="polite" data-testid="status-announcement">{announcement}</div>
+      {versionTwo && (
+        <img ref={imgTwoRef} src={versionTwo.url} onLoad={() => setLoadTick((t) => t + 1)} alt="" aria-hidden="true" style={{ display: 'none' }} data-testid="diff-source-v2" />
+      )}
     </div>
   );
 }
