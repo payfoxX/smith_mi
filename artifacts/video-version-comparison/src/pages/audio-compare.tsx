@@ -24,8 +24,8 @@ import {
   DEFAULT_FFT_SIZE,
   DEFAULT_HOP_SIZE,
   MAX_ANALYSIS_SECONDS,
-  compareAudio,
   resample,
+  type AudioDiffOptions,
   type AudioDiffResult,
 } from '../audio/dsp';
 import {
@@ -61,10 +61,34 @@ const formatAudioTime = (seconds: number) => {
   return `${m}:${String(s).padStart(2, '0')}.${d}`;
 };
 
-let decodeContext: OfflineAudioContext | null = null;
-function getDecodeContext(): OfflineAudioContext {
-  if (!decodeContext) decodeContext = new OfflineAudioContext(1, 1, ANALYSIS_RATE);
-  return decodeContext;
+// A shared AudioContext is the most widely supported decode path. Created
+// lazily on the first load (a user gesture) and reused for every file.
+let audioContext: AudioContext | null = null;
+
+function getDecodeContext(): AudioContext | null {
+  const Ctor =
+    window.AudioContext ??
+    (window as unknown as { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!Ctor) return null;
+  if (!audioContext) audioContext = new Ctor();
+  if (audioContext.state === 'suspended') void audioContext.resume();
+  return audioContext;
+}
+
+// decodeAudioData with the callback form, wrapped in a promise — works in
+// every browser that supports the Web Audio API (including older Safari).
+function decodeAudio(
+  context: AudioContext,
+  arrayBuffer: ArrayBuffer,
+): Promise<AudioBuffer> {
+  return new Promise((resolve, reject) => {
+    try {
+      context.decodeAudioData(arrayBuffer, resolve, reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
 }
 
 function DropZone({
@@ -254,10 +278,12 @@ export default function AudioComparePage() {
   const [sensitivity, setSensitivity] = useState(6);
   const [levelMatch, setLevelMatch] = useState(true);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState('Load two local audio files to begin.');
   const [analysis, setAnalysis] = useState<AudioDiffResult | null>(null);
   const audioOneRef = useRef<HTMLAudioElement>(null);
   const audioTwoRef = useRef<HTMLAudioElement>(null);
+  const workerRef = useRef<Worker | null>(null);
   const analysisSeqRef = useRef(0);
   const objectUrls = useRef<string[]>([]);
 
@@ -265,12 +291,60 @@ export default function AudioComparePage() {
   const loadedCount = Number(Boolean(versionOne)) + Number(Boolean(versionTwo));
   const truncated = Boolean(versionOne?.truncated || versionTwo?.truncated);
 
+  // Run the spectral comparison in a worker so long files never freeze the UI.
+  const getWorker = useCallback(() => {
+    if (workerRef.current) return workerRef.current;
+    const worker = new Worker(
+      new URL('../audio/analysis-worker.ts', import.meta.url),
+      { type: 'module' },
+    );
+    worker.onmessage = (event: MessageEvent) => {
+      const { id, ok, result, error } = event.data as {
+        id: number;
+        ok: boolean;
+        result?: AudioDiffResult;
+        error?: string;
+      };
+      if (id !== analysisSeqRef.current) return;
+      setIsAnalyzing(false);
+      if (ok && result) {
+        setAnalysis(result);
+        setDuration(result.duration);
+        setErrorMessage(null);
+      } else {
+        console.error('Audio analysis failed:', error);
+        setErrorMessage(error ? `Analysis failed: ${error}` : 'Analysis failed.');
+      }
+    };
+    worker.onerror = (event) => {
+      setIsAnalyzing(false);
+      setErrorMessage(`Analysis worker error: ${event.message}`);
+    };
+    workerRef.current = worker;
+    return worker;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+      objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
+
   const loadFile = useCallback(async (version: Version, file: File) => {
+    setErrorMessage(null);
     const url = URL.createObjectURL(file);
     objectUrls.current.push(url);
+    const context = getDecodeContext();
+    if (!context) {
+      setErrorMessage('Web Audio is not available in this browser — try Chrome, Edge, Firefox or Safari.');
+      URL.revokeObjectURL(url);
+      return;
+    }
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const buffer = await getDecodeContext().decodeAudioData(arrayBuffer);
+      const buffer = await decodeAudio(context, arrayBuffer);
       const channels = Math.min(2, buffer.numberOfChannels);
       const mix = new Float32Array(buffer.length);
       for (let c = 0; c < channels; c += 1) {
@@ -292,8 +366,9 @@ export default function AudioComparePage() {
       if (version === 1) setVersionOne(loaded);
       else setVersionTwo(loaded);
       setAnnouncement(`Version ${version} loaded. ${file.name} is ready for comparison.`);
-    } catch {
-      setAnnouncement(`Could not decode Version ${version}. Try another local audio file.`);
+    } catch (error) {
+      console.error(`Could not decode Version ${version}:`, error);
+      setErrorMessage(`Could not decode ${file.name}. Try a .wav, .mp3, .m4a, .aac or .ogg file.`);
       URL.revokeObjectURL(url);
     }
   }, []);
@@ -306,42 +381,36 @@ export default function AudioComparePage() {
     setAnnouncement(`Version ${version} removed.`);
   }, []);
 
-  useEffect(() => {
-    return () => objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
-  }, []);
-
-  // Recompute the spectral difference whenever inputs or settings change.
-  // Debounced and token-guarded so rapid slider drags don't pile up work.
+  // Kick off the worker analysis whenever the inputs or settings change.
+  // Token-guarded: only the newest request is applied.
   useEffect(() => {
     if (!versionOne || !versionTwo) {
       setAnalysis(null);
-      setDuration(0);
+      setDuration(versionOne?.duration ?? versionTwo?.duration ?? 0);
       setIsAnalyzing(false);
       return;
     }
     const token = (analysisSeqRef.current += 1);
     setIsAnalyzing(true);
     const timer = window.setTimeout(() => {
-      try {
-        const result = compareAudio(versionOne.mono, versionTwo.mono, ANALYSIS_RATE, {
-          fftSize: DEFAULT_FFT_SIZE,
-          hopSize: DEFAULT_HOP_SIZE,
-          slackDb: sensitivity,
-          levelMatch,
-        });
-        if (token !== analysisSeqRef.current) return;
-        setAnalysis(result);
-        setDuration(result.duration);
-        setIsAnalyzing(false);
-      } catch (error) {
-        if (token !== analysisSeqRef.current) return;
-        setIsAnalyzing(false);
-        console.error('Audio analysis failed:', error);
-        setAnnouncement('Analysis failed — try reloading the files or adjusting the sensitivity.');
-      }
-    }, 280);
+      if (token !== analysisSeqRef.current) return;
+      const worker = getWorker();
+      const options: AudioDiffOptions = {
+        fftSize: DEFAULT_FFT_SIZE,
+        hopSize: DEFAULT_HOP_SIZE,
+        slackDb: sensitivity,
+        levelMatch,
+      };
+      // Copies are transferred into the worker; the originals stay for rendering.
+      const v1 = versionOne.mono.slice();
+      const v2 = versionTwo.mono.slice();
+      worker.postMessage(
+        { id: token, v1, v2, sampleRate: ANALYSIS_RATE, options },
+        [v1.buffer, v2.buffer],
+      );
+    }, 260);
     return () => window.clearTimeout(timer);
-  }, [versionOne, versionTwo, sensitivity, levelMatch]);
+  }, [versionOne, versionTwo, sensitivity, levelMatch, getWorker]);
 
   useEffect(() => {
     const one = audioOneRef.current;
@@ -433,6 +502,7 @@ export default function AudioComparePage() {
   }, [analysis, currentTime, duration]);
 
   const eventKindLabel: Record<string, string> = { added: 'ADDED', removed: 'REMOVED', pitch: 'PITCH' };
+  const showScan = isAnalyzing && hasAudio;
 
   return (
     <div className="app-shell dark">
@@ -464,45 +534,65 @@ export default function AudioComparePage() {
 
             <section className="viewer-frame" aria-label="Audio comparison viewer">
               <div className="viewer-head">
-                <div className="viewer-title"><AudioLines size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/{viewMode === 'wave' ? 'WAVEFORM' : 'SPECTRAL MAP'}</span></div>
+                <div className="viewer-title"><AudioLines size={14} color="#55c7ed" /> COMPARISON VIEWER <span style={{ color: '#506771', font: '9px var(--app-font-mono)' }}>/{viewMode === 'wave' ? 'WAVEFORM SCANNER' : 'SPECTRAL MAP'}</span></div>
                 <div className="view-switch" role="tablist" aria-label="Comparison view mode">
                   <button type="button" className={viewMode === 'wave' ? 'active' : ''} onClick={() => setViewMode('wave')} role="tab" aria-selected={viewMode === 'wave'} data-testid="button-view-wave">WAVEFORM</button>
                   <button type="button" className={viewMode === 'spectral' ? 'active' : ''} onClick={() => setViewMode('spectral')} role="tab" aria-selected={viewMode === 'spectral'} data-testid="button-view-spectral">SPECTRAL MAP</button>
                 </div>
               </div>
               <div className="audio-stage">
-                {isAnalyzing ? (
-                  <div className="empty-viewer">
-                    <div className="empty-inner">
-                      <div className="processing" style={{ justifyContent: 'center' }}><i className="pulse" /> ANALYZING SPECTRA</div>
-                      <div className="empty-copy" style={{ marginTop: 10 }}>Comparing frequency content across the full timeline.</div>
-                    </div>
-                  </div>
-                ) : analysis && versionOne && versionTwo ? (
+                {errorMessage && (
+                  <div className="audio-error" data-testid="status-error"><AlertTriangle size={12} /> {errorMessage}</div>
+                )}
+                {versionOne || versionTwo ? (
                   viewMode === 'wave' ? (
                     <div className="wave-view">
                       <div className="wave-row">
                         <span className="pane-label">V1 · MASTER</span>
-                        <WaveformLane samples={versionOne.mono} sampleRate={ANALYSIS_RATE} duration={duration} windows={analysis.windows} hopSize={analysis.hopSize} color="#8fd6ea" playhead={currentTime} onSeek={seek} />
+                        {versionOne ? (
+                          <WaveformLane samples={versionOne.mono} sampleRate={ANALYSIS_RATE} duration={versionOne.duration} windows={analysis?.windows ?? []} hopSize={analysis?.hopSize ?? 512} color="#8fd6ea" playhead={currentTime} onSeek={seek} />
+                        ) : (
+                          <div className="wave-empty">Awaiting Version 1</div>
+                        )}
                       </div>
                       <div className="wave-row">
                         <span className="pane-label version-two">V2 · SUBMITTED</span>
-                        <WaveformLane samples={versionTwo.mono} sampleRate={ANALYSIS_RATE} duration={duration} windows={analysis.windows} hopSize={analysis.hopSize} color="#efb0b4" playhead={currentTime} onSeek={seek} />
+                        {versionTwo ? (
+                          <WaveformLane samples={versionTwo.mono} sampleRate={ANALYSIS_RATE} duration={versionTwo.duration} windows={analysis?.windows ?? []} hopSize={analysis?.hopSize ?? 512} color="#efb0b4" playhead={currentTime} onSeek={seek} />
+                        ) : (
+                          <div className="wave-empty">Awaiting Version 2</div>
+                        )}
                       </div>
                       <div className="wave-diff-row">
                         <span className="pane-label diff-label">Δ</span>
-                        <DiffStrip windows={analysis.windows} sampleRate={ANALYSIS_RATE} hopSize={analysis.hopSize} duration={duration} playhead={currentTime} onSeek={seek} />
+                        {analysis ? (
+                          <DiffStrip windows={analysis.windows} sampleRate={ANALYSIS_RATE} hopSize={analysis.hopSize} duration={duration} playhead={currentTime} onSeek={seek} />
+                        ) : (
+                          <div className="wave-empty">Load both versions to scan the difference</div>
+                        )}
+                      </div>
+                      {showScan && (
+                        <div className="scan-overlay" data-testid="status-scanning">
+                          <span className="scan-pill"><i className="pulse" /> SCANNING AUDIO…</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : analysis ? (
+                    <SpectralMap result={analysis} playhead={currentTime} onSeek={seek} />
+                  ) : (
+                    <div className="empty-viewer">
+                      <div className="empty-inner">
+                        <div className="processing" style={{ justifyContent: 'center' }}><i className="pulse" /> ANALYZING SPECTRA</div>
+                        <div className="empty-copy" style={{ marginTop: 10 }}>Comparing frequency content across the full timeline.</div>
                       </div>
                     </div>
-                  ) : (
-                    <SpectralMap result={analysis} playhead={currentTime} onSeek={seek} />
                   )
                 ) : (
                   <div className="empty-viewer">
                     <div className="empty-inner">
                       <div className="empty-glyph"><AudioLines size={19} /></div>
-                      <div className="empty-title">Audio comparator standing by</div>
-                      <div className="empty-copy">Load two versions to display aligned waveforms and a spectral difference map.</div>
+                      <div className="empty-title">Audio wave scanner standing by</div>
+                      <div className="empty-copy">Load a version to see its waveform immediately — load both to scan for differences.</div>
                     </div>
                   </div>
                 )}
@@ -516,7 +606,7 @@ export default function AudioComparePage() {
               <div className="viewer-foot">
                 <span><strong>{loadedCount}/2</strong> versions loaded</span>
                 <span>{duration ? `${formatAudioTime(duration)} · ${ANALYSIS_RATE / 1000} kHz mono analysis` : 'Awaiting media'}</span>
-                <span className="foot-notice">{isAnalyzing ? <span className="processing"><i className="pulse" /> ANALYZING</span> : hasAudio ? 'SPECTRAL SYNC READY' : 'SELECT FILES TO BEGIN'}</span>
+                <span className="foot-notice">{isAnalyzing ? <span className="processing"><i className="pulse" /> SCANNING</span> : hasAudio ? 'SPECTRAL SYNC READY' : 'SELECT FILES TO BEGIN'}</span>
               </div>
               {truncated && (
                 <div className="diff-mismatch" data-testid="status-truncated"><AlertTriangle size={11} /> Analysis covers the first {formatAudioTime(MAX_ANALYSIS_SECONDS)} of each file</div>
