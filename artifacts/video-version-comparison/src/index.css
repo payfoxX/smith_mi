@@ -154,8 +154,8 @@ button:focus-visible, input:focus-visible, .drop-zone:focus-within {
 .wipe-canvas { width: 100%; height: 100%; display: block; }
 
 /* --- Audio comparison stage --- */
-.audio-stage { height: 320px; position: relative; background: #080d12; overflow: hidden; }
-.wave-view { position: absolute; inset: 0; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) 30px; gap: 1px; background: #22333d; }
+.audio-stage { height: 340px; position: relative; background: #080d12; overflow: hidden; }
+.wave-view { position: absolute; inset: 0; display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr) 34px; gap: 1px; background: #22333d; }
 .wave-row { position: relative; min-height: 0; background: #0b141b; }
 .wave-diff-row { position: relative; min-height: 0; background: #0b141b; }
 .diff-strip { width: 100%; height: 100%; }

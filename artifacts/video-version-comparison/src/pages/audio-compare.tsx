@@ -322,16 +322,23 @@ export default function AudioComparePage() {
     const token = (analysisSeqRef.current += 1);
     setIsAnalyzing(true);
     const timer = window.setTimeout(() => {
-      const result = compareAudio(versionOne.mono, versionTwo.mono, ANALYSIS_RATE, {
-        fftSize: DEFAULT_FFT_SIZE,
-        hopSize: DEFAULT_HOP_SIZE,
-        slackDb: sensitivity,
-        levelMatch,
-      });
-      if (token !== analysisSeqRef.current) return;
-      setAnalysis(result);
-      setDuration(result.duration);
-      setIsAnalyzing(false);
+      try {
+        const result = compareAudio(versionOne.mono, versionTwo.mono, ANALYSIS_RATE, {
+          fftSize: DEFAULT_FFT_SIZE,
+          hopSize: DEFAULT_HOP_SIZE,
+          slackDb: sensitivity,
+          levelMatch,
+        });
+        if (token !== analysisSeqRef.current) return;
+        setAnalysis(result);
+        setDuration(result.duration);
+        setIsAnalyzing(false);
+      } catch (error) {
+        if (token !== analysisSeqRef.current) return;
+        setIsAnalyzing(false);
+        console.error('Audio analysis failed:', error);
+        setAnnouncement('Analysis failed — try reloading the files or adjusting the sensitivity.');
+      }
     }, 280);
     return () => window.clearTimeout(timer);
   }, [versionOne, versionTwo, sensitivity, levelMatch]);
@@ -416,7 +423,7 @@ export default function AudioComparePage() {
   const progress = duration ? (currentTime / duration) * 100 : 0;
 
   const readout = useMemo(() => {
-    if (!analysis || !duration) return null;
+    if (!analysis || !duration || analysis.windows.length === 0) return null;
     const wi = Math.min(
       analysis.windows.length - 1,
       Math.floor((currentTime * ANALYSIS_RATE) / analysis.hopSize),
@@ -580,8 +587,12 @@ export default function AudioComparePage() {
         />
       </div>
 
-      {versionOne && <audio ref={audioOneRef} src={versionOne.url} preload="auto" style={{ display: 'none' }} data-testid="audio-version-1" />}
-      {versionTwo && <audio ref={audioTwoRef} src={versionTwo.url} preload="auto" style={{ display: 'none' }} data-testid="audio-version-2" />}
+      {(versionOne || versionTwo) && (
+        <div aria-hidden="true" style={{ position: 'absolute', left: -99999, top: 0, width: 1, height: 1, opacity: 0, overflow: 'hidden', pointerEvents: 'none' }}>
+          {versionOne && <audio ref={audioOneRef} src={versionOne.url} preload="auto" data-testid="audio-version-1" />}
+          {versionTwo && <audio ref={audioTwoRef} src={versionTwo.url} preload="auto" data-testid="audio-version-2" />}
+        </div>
+      )}
 
       <div className="sr-only" role="status" aria-live="polite" data-testid="status-announcement">{announcement}</div>
     </div>
